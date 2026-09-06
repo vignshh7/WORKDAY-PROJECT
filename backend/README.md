@@ -6,7 +6,7 @@ pipelines, availability, and deterministic interview scheduling. A future Agenti
 will orchestrate this backend through controlled service methods; it will never access the
 database directly.
 
-Status: **Phase 7 complete** (interview process + state machine). See [Implementation Phases](#implementation-phases).
+Status: **Phase 8 complete** (interviewer + skill matching). See [Implementation Phases](#implementation-phases).
 
 > Phase numbering follows the project's master prompt (Phase 0–40), which supersedes an
 > earlier, coarser 17-phase draft. Phases 1 and 2 below were built under the old numbering
@@ -175,8 +175,8 @@ Once Swagger is wired (Phase 17): `http://localhost:8080/swagger-ui.html`
 | 5 | Authentication + JWT + RBAC | ✅ Done |
 | 6 | Users + candidates + jobs | ✅ Done |
 | 7 | Interview process + state machine | ✅ Done |
-| 8 | Interviewer + skill matching | ⏳ Next |
-| 9 | Availability + working hours + timezones | Pending |
+| 8 | Interviewer + skill matching | ✅ Done |
+| 9 | Availability + working hours + timezones | ⏳ Next |
 | 10 | Conflict detection | Pending |
 | 11 | Slot finding + ranking | Pending |
 | 12 | Booking + concurrency + idempotency | Pending |
@@ -449,6 +449,52 @@ cleanly (JDK 21) with the new `InterviewProcessService`, `InterviewProcessContro
 above was traced by hand against every prevention rule in the spec. **Run `./mvnw spring-boot:run`
 against a real database and exercise all five endpoints before starting Phase 8**, the same
 way every prior phase was closed out.
+
+## Interviewer + Skill Matching (Phase 8)
+
+`InterviewerService` covers the five listed endpoints (`GET /api/interviewers`,
+`GET/POST /api/interviewers/{id}/skills`, `GET /api/interviewers/{id}`) with the same
+self-or-staff object-level pattern as Candidate/Job. There's deliberately **no**
+`POST /api/interviewers` — Phase 4's DTO list only ever specified `InterviewerResponse` +
+`InterviewerSkillRequest`, never a create/update request, so interviewer profiles are
+provisioned outside the API (seed data / direct admin action), not through it. That means
+this phase's matching logic can't yet be exercised end-to-end through the API alone — it
+needs at least one `interviewer_profiles` row to exist already.
+
+`InterviewerMatchingService.match(roundId)` (`POST /api/interviewers/match`) is the actual
+Phase 8 deliverable:
+
+1. **Effective requirements** — round-specific `round_requirements` win if any exist for the
+   round; otherwise the algorithm falls back to the job's `job_skills`. (There's no endpoint
+   yet to populate `round_requirements` — Phase 8 doesn't add one either — so today this
+   almost always falls back to job skills; the round-level override is wired up and ready
+   for whenever one is added.)
+2. **Hard eligibility** (disqualifying) — missing a required skill, proficiency below that
+   skill's minimum, or the interviewer's user account not `ACTIVE`.
+3. **Soft ranking** (eligible interviewers only) — summed proficiency across all matched
+   skills (required and optional), a bonus for headroom above the minimum, a bonus for
+   skills marked `is_primary`, a domain-match bonus (job domain vs. interviewer domain), and
+   a workload penalty (count of the interviewer's active `INTERVIEWER` participant rows —
+   necessarily 0 for everyone until Phase 12+ starts assigning participants, but the
+   computation is real, not a stub).
+
+**A spec discrepancy, resolved explicitly:** the "matching order" line
+(`... -> HARD SKILL ELIGIBILITY -> DOMAIN -> ACTIVE STATUS -> WORKLOAD`) reads as if domain
+and active-status were sequential filter stages, but the spec's own, more specific
+"hard eligibility" list only names missing skill / low proficiency / inactive interviewer /
+"allowed for round" (the last of which has no corresponding data field — read here as
+trivially satisfied by having an `interviewer_profiles` row at all), while its separate
+"soft ranking" list explicitly includes domain. The more specific list wins: **domain is
+ranking-only here, not disqualifying.** `MatchInterviewersResponse` returns two lists —
+`eligibleInterviewers` (ranked, highest score first) and `ineligibleInterviewers` (each with
+its `failureReasons`) — directly matching the spec's "return eligible and failed reasons."
+
+**Verification:** same constraint as Phase 7 — no network route to the configured Supabase
+instance and no local Postgres/Docker in this environment, so this was verified with a clean
+`compile`/`test-compile`/`package` under JDK 21, not a live boot or real HTTP requests.
+**Seed at least one interviewer profile with skills and run `/api/interviewers/match`
+against a real round before starting Phase 9**, the same way every prior phase was closed
+out with real requests.
 
 ## Deployment Preparation (later)
 
