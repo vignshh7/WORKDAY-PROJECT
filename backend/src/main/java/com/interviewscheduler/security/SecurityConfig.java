@@ -37,6 +37,10 @@ public class SecurityConfig {
                         .accessDeniedHandler(accessDeniedHandler))
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/api/auth/**").permitAll()
+                        // Google's OAuth redirect lands the admin's browser here directly with
+                        // no way to attach our JWT; the one-time `state` param is the CSRF
+                        // defense instead (see GoogleOAuthService).
+                        .requestMatchers("/api/integrations/google-calendar/callback").permitAll()
                         .requestMatchers("/actuator/health", "/actuator/info").permitAll()
                         .requestMatchers("/v3/api-docs/**", "/swagger-ui/**", "/swagger-ui.html").permitAll()
                         .anyRequest().authenticated())

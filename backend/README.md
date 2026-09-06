@@ -6,7 +6,7 @@ pipelines, availability, and deterministic interview scheduling. A future Agenti
 will orchestrate this backend through controlled service methods; it will never access the
 database directly.
 
-Status: **Phase 14 complete** (reusable rescheduling engine). See [Implementation Phases](#implementation-phases).
+Status: **Phase 20 complete** (Google OAuth + Calendar + Meet). See [Implementation Phases](#implementation-phases).
 
 > Phase numbering follows the project's master prompt (Phase 0–40), which supersedes an
 > earlier, coarser 17-phase draft. Phases 1 and 2 below were built under the old numbering
@@ -188,13 +188,13 @@ Once Swagger is wired (Phase 17): `http://localhost:8080/swagger-ui.html`
 | 12 | Booking + concurrency + idempotency | ✅ Done |
 | 13 | Normal recruiter scheduling (wiring) | ✅ Done |
 | 14 | Reusable rescheduling engine | ✅ Done |
-| 15 | Interviewer cancellation | ⏳ Next |
-| 16 | Backup + replacement | Pending |
-| 17 | Participant decline + rescheduling | Pending |
-| 18 | Pipeline consistency | Pending |
-| 19 | Calendar provider abstraction | Pending |
-| 20 | Google OAuth + Calendar + Meet | Pending |
-| 21 | Google Calendar webhook + reconciliation | Pending |
+| 15 | Interviewer cancellation | ✅ Done |
+| 16 | Backup + replacement | ✅ Done |
+| 17 | Participant decline + rescheduling | ✅ Done |
+| 18 | Pipeline consistency | ✅ Done |
+| 19 | Calendar provider abstraction | ✅ Done |
+| 20 | Google OAuth + Calendar + Meet | ✅ Done |
+| 21 | Google Calendar webhook + reconciliation | ⏳ Next |
 | 22 | Notifications | Pending |
 | 23 | Reminders | Pending |
 | 24 | Audit logging (service + API) | Pending |
@@ -833,6 +833,101 @@ correctly defaulted to searching from today. Separately, cancelling a different 
 correctly produced `CANCELLED`, a cancelled calendar event, both participants `REMOVED`, an
 `INTERVIEW_CANCELLED` notification/audit row, a `403` for a non-staff caller, and a `409` on a
 second cancel attempt. No bugs found this round.
+
+## Google OAuth + Calendar + Meet (Phase 20)
+
+Phase 19 shipped `GoogleCalendarProvider` as a structured stub that always threw
+`CalendarIntegrationException` ("not yet wired with real OAuth credentials"). Phase 20 replaces
+those TODO blocks with real Google Calendar API v3 calls and adds the OAuth2 plumbing needed to
+get an access token in the first place — new Maven dependencies (`google-api-client`,
+`google-oauth-client`, `google-api-services-calendar`, `google-http-client-gson`; no version
+was on the classpath already, so exact current Maven Central coordinates were looked up rather
+than guessed) and a new `google_oauth_tokens` table (migration V20).
+
+**One org-wide connection, not one per user.** An ADMIN authorizes *one* Google account once;
+every interview event is created on that account's `primary` calendar, with every
+candidate/interviewer/recruiter invited as an attendee by email address — they never need their
+own Google OAuth connection. This matches Phase 19's own design (its TODO comments already
+called the calendar `"primary"`, singular) and keeps the flow to what a hackathon/demo setting
+can actually complete: one Google Cloud OAuth client, one consent screen click.
+
+- **`GoogleOAuthService`** drives the authorization-code handshake:
+  `GET /api/integrations/google-calendar/authorize` (ADMIN) returns Google's consent URL, with
+  a one-time `state` value (an in-memory map, not a DB table — this is a short-lived CSRF
+  handshake, not data that needs to survive a restart) tying the eventual callback back to
+  whoever clicked it. `GET /api/integrations/google-calendar/callback` is the only endpoint in
+  the whole API that's genuinely public (`SecurityConfig` `permitAll`s it) — Google redirects
+  the admin's *browser* here directly with no way to attach our JWT, so the `state` round-trip
+  is the CSRF defense instead. `prompt=consent` is forced on every authorization URL so Google
+  always issues a `refresh_token`, even on a re-authorization (Google otherwise only grants one
+  on a account's *first-ever* consent for this app).
+- **`GoogleOAuthTokenService`** persists the single connection row and is the only thing that
+  knows about token refresh: `getValidAccessToken()` is called before every Calendar API call
+  and transparently refreshes if the stored token is within 60 seconds of expiring, so
+  `GoogleCalendarProvider` never has to think about token lifecycle.
+- **`GoogleCalendarProvider`** now does real work: `createEvent` requests a Google Meet
+  conference (`conferenceData` + `hangoutsMeet` solution key, `conferenceDataVersion=1`) and
+  returns the real `hangoutLink`; `updateEvent` patches an existing event; `cancelEvent` deletes
+  one and treats a 404 (already gone at Google) as success, per the interface's documented
+  contract. Every write uses `sendUpdates("none")` — this system already has its own
+  `NotificationService` (Phase 22) as the single source of truth for who was told what, so
+  Google is deliberately not asked to also email attendees directly.
+- **`GET /api/integrations/google-calendar/status`** (RECRUITER/ADMIN) reports whether a
+  connection exists, who connected it, and its token expiry — enough to confirm the setup
+  without needing DB access.
+
+**Known gap, carried from Phase 19, stated explicitly rather than silently fixed:** nothing in
+the booking/rescheduling orchestration (Phases 12–17) calls `updateEvent` — a reschedule or
+interviewer switch always cancels the old calendar event and creates a fresh one, because the
+new slot can land on a different interviewer or participant list, not just a different time on
+the same attendees. `updateEvent` is implemented correctly here and ready for a caller, but
+re-plumbing four already-verified phases to prefer an in-place update is a separate decision,
+not one to make as a side effect of this phase.
+
+**A real bug, found by live-testing against this exact new code path, not left for later:**
+the first live booking attempt with `calendar.provider=google` (Google Calendar not yet
+connected) returned `500 Unhandled exception ... UnexpectedRollbackException: Transaction
+silently rolled back because it has been marked as rollback-only` — instead of the booking
+succeeding with the calendar event marked `FAILED`, which is the explicit Phase 12 contract
+("calendar failure never rolls back booking"). Root cause: `GoogleOAuthTokenService
+.getValidAccessToken()` was `@Transactional` with the default `REQUIRED` propagation, so when
+it threw (no connection yet), it joined and poisoned the *same physical transaction* as the
+enclosing `InterviewBookingService.book()` call — Spring's transactional advice marks a
+transaction rollback-only the instant an unchecked exception crosses *any* `@Transactional`
+method boundary on it, regardless of whether something further up the call stack (here,
+`CalendarSyncService.syncCreate`'s `catch (CalendarIntegrationException)`) goes on to swallow
+it. The booking transaction itself never threw anything — it just found itself unable to
+commit. Fixed by switching `getValidAccessToken()` and `forceRefreshAccessToken()` to
+`Propagation.REQUIRES_NEW`, so a thrown exception only rolls back this method's own (suspended,
+independent) transaction and never touches the caller's. Re-ran the identical booking
+afterward: `200 SCHEDULED`, with the `calendar_events` row correctly `FAILED` and an
+`audit_logs` `CALENDAR_SYNC_FAILED` row recorded — exactly the intended behavior.
+
+**Verified live** against the real Supabase database with real HTTP requests, using a fresh
+candidate/job/process/interviewer (seeded via direct SQL for the interviewer profile — there is
+still no `POST /api/interviewers` endpoint, per Phase 8's own note that profiles are provisioned
+outside the API):
+- `GET /authorize` as a non-ADMIN correctly `403`s; as ADMIN with no `GOOGLE_CLIENT_ID`/
+  `GOOGLE_CLIENT_SECRET`/`GOOGLE_REDIRECT_URI` configured, correctly `502`s with a clear
+  "Google OAuth is not configured" message rather than a stack trace.
+- `GET /callback` with no `Authorization` header at all still reaches the handler (confirms
+  `SecurityConfig`'s `permitAll` is scoped correctly) and fails on the same "not configured"
+  check, not a `401`.
+- `GET /status` correctly reports `{"connected": false, "activeProvider": "noop"}` before any
+  connection exists, and enforces RECRUITER/ADMIN-only (`403` for a CANDIDATE).
+- With `calendar.provider=google` active (no OAuth credentials available in this environment to
+  complete a real consent screen — the same constraint Phase 19 documented), a booking against
+  the round above surfaced the `UnexpectedRollbackException` bug above; after the fix, the
+  identical request returned `200 SCHEDULED` with `calendar_events.status = FAILED` and
+  `provider = GOOGLE`, and cancelling that same round afterward (exercising `cancelEvent`'s
+  error path through the same fixed seam) also completed cleanly.
+- **Not verified**: an actual end-to-end OAuth consent screen + token exchange + real Google
+  Meet link creation, since no `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` pair was available in
+  this environment (same limitation Phase 19 flagged). Everything up to that boundary — the
+  authorization URL construction, state validation, RBAC, and every code path a failed/absent
+  connection exercises — was verified for real; running the actual consent flow once real
+  Google Cloud OAuth credentials are provisioned is the one remaining step before relying on
+  this in production.
 
 ## Deployment Preparation (later)
 
