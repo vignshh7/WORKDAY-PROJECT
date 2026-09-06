@@ -6,7 +6,7 @@ pipelines, availability, and deterministic interview scheduling. A future Agenti
 will orchestrate this backend through controlled service methods; it will never access the
 database directly.
 
-Status: **Phase 10 complete** (conflict detection). See [Implementation Phases](#implementation-phases).
+Status: **Phase 11 complete** (slot finding + ranking). See [Implementation Phases](#implementation-phases).
 
 > Phase numbering follows the project's master prompt (Phase 0–40), which supersedes an
 > earlier, coarser 17-phase draft. Phases 1 and 2 below were built under the old numbering
@@ -184,8 +184,8 @@ Once Swagger is wired (Phase 17): `http://localhost:8080/swagger-ui.html`
 | 8 | Interviewer + skill matching | ✅ Done |
 | 9 | Availability + working hours + timezones | ✅ Done |
 | 10 | Conflict detection | ✅ Done |
-| 11 | Slot finding + ranking | ⏳ Next |
-| 12 | Booking + concurrency + idempotency | Pending |
+| 11 | Slot finding + ranking | ✅ Done |
+| 12 | Booking + concurrency + idempotency | ⏳ Next |
 | 13 | Normal recruiter scheduling (wiring) | Pending |
 | 14 | Reusable rescheduling engine | Pending |
 | 15 | Interviewer cancellation | Pending |
@@ -605,6 +605,72 @@ read as 14:30 — both misjudged). Fixed globally in `application.yml`
 threading a timezone field through every `OffsetDateTime`-carrying DTO — every comparison
 elsewhere in the codebase uses instant semantics (`isBefore`/`isAfter`), which are
 offset-representation-independent and were never affected.
+
+## Slot Finding + Ranking (Phase 11)
+
+Three endpoints under `/api/scheduling` (RECRUITER/ADMIN), backed by three services with a
+clean split of responsibility:
+
+- **`SlotFinderService`** (`POST /find-slots`, spec steps 1-18) — deterministic feasibility
+  only, no scoring beyond carrying over each interviewer's Phase 8 match score. Validates the
+  candidate/round pair and schedulability (candidate not REJECTED/WITHDRAWN, round `PENDING`
+  or `RESCHEDULE_REQUIRED`, its `dependsOnRound` — if any — already `COMPLETED`+`PASS`),
+  fetches eligible interviewers from `InterviewerMatchingService`, then intersects everyone's
+  `AVAILABLE` windows (candidate, each required participant, then per-interviewer) as UTC
+  instant ranges — reusing `TimezoneService` from Phase 9, the same DST/cross-timezone-correct
+  machinery that made Availability's own overlap check correct. Within each common window it
+  tries candidate start times at a 30-minute stride (capped at 6 per window, to bound the
+  search), filters each by notice period / max horizon / weekend-or-excluded-day / preferred
+  time / working hours, then runs a **fresh** `ConflictDetectionService.checkConflicts` call
+  per surviving candidate — the same method Phase 10 built and the same one Phase 12's booking
+  flow is expected to call again immediately before committing.
+- **`SlotRankingService`** (`POST /rank-slots`, step 19) — a pure function of
+  (request context, slots): takes the interviewer's Phase 8 match score as its base, adds a
+  bonus for the requested `preferredInterviewerId` and for falling inside
+  `preferredTimeStart`/`preferredTimeEnd`, and applies a small "sooner is better" per-day
+  penalty. Deliberately doesn't re-derive or re-check anything — it can rank slots from any
+  source, not just this service's own finder.
+- **`SchedulingService`** (`POST /recommend`, step 20) — find, then rank, then split into the
+  top 3 as `slots` (the recommendation) and the rest as `alternatives`; on zero slots it just
+  returns the finder's result (already carrying the `reasonCode`) unchanged.
+
+**No slot found** returns `200` with an empty `slots` list and one of the spec's reason codes —
+never an exception, since "nothing bookable" is a legitimate outcome, not a failure. The seven
+codes map to distinct, ordered stages of the search (each one only returned if *every* earlier
+stage produced at least one candidate): `NO_QUALIFIED_INTERVIEWER` (Phase 8 found nobody
+eligible) -> `NO_CANDIDATE_AVAILABILITY` (candidate has no `AVAILABLE` rows in range) ->
+`NO_INTERVIEWER_AVAILABILITY` (none of the eligible interviewers do either) ->
+`NO_COMMON_SLOT` (everyone has *some* availability, but no window of sufficient duration is
+shared by all of them) -> `DATE_RANGE_EXHAUSTED` (a common window existed, but every candidate
+start inside it failed notice/horizon/weekend/excluded-day/preferred-time filtering) ->
+`OUTSIDE_WORKING_HOURS` (survived those, but not the literal working-hours check — chiefly
+reachable via a `preferredTimeStart`/`preferredTimeEnd` that itself falls outside configured
+hours, since `AVAILABLE` rows are already constrained to working hours at creation time) ->
+`ALL_SLOTS_CONFLICTED` (reached a fresh conflict check, but every candidate had one).
+
+**Two spec gaps, resolved explicitly, not silently:**
+- `requiredParticipantIds` is a plain `List<UUID>` (unlike Phase 10's `CheckConflictsRequest`,
+  which pairs each id with a `ParticipantRole`) — each id's role is looked up from `users`
+  instead of trusted from the caller, which is arguably more correct anyway (role is intrinsic
+  to the account, not something the caller should get to assert).
+- The system has no `HIRING_MANAGER` **user role** (`User.Role` is only
+  `ADMIN`/`RECRUITER`/`INTERVIEWER`/`CANDIDATE`), even though `ParticipantRole` has a
+  `HIRING_MANAGER` value for actual interview participants. A required participant is
+  classified as `RECRUITER` unless their account role is literally `CANDIDATE` or
+  `INTERVIEWER` — this is a pre-existing modeling gap from earlier phases, not something to
+  invent a schema change for here.
+
+**Verified live** against the real Supabase database with real HTTP requests (candidate and
+interviewer `AVAILABLE` windows overlapping 10:00-12:00 IST on a future Monday): `/find-slots`
+returned exactly the 3 valid 60-minute starts the 2-hour common window allows (10:00, 10:30,
+11:00 — the 30-minute stride naturally stops there since 11:30+60min would exceed the window);
+`/recommend` with `preferredTimeStart=11:00` correctly narrowed to just the 11:00 slot and its
+ranking math checked out by hand (base score + preferred-time bonus - sooner-penalty); calling
+`/find-slots` against a round already `SCHEDULED` (seeded during Phase 10's testing) correctly
+returned 409 before reaching the dependency check; a date range with no candidate availability
+correctly returned `NO_CANDIDATE_AVAILABILITY`; `/rank-slots` correctly applied the preferred-
+interviewer bonus and re-sorted; a non-RECRUITER/ADMIN caller got 403 on all three endpoints.
+No bugs found this round — everything behaved as designed on the first live pass.
 
 ## Deployment Preparation (later)
 
