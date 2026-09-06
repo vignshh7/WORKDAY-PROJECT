@@ -1,0 +1,583 @@
+============================================================
+FRONTEND IMPLEMENTATION PLAN — Agentic AI Smart Interview Scheduling Platform
+============================================================
+This is Phases 31-40 of the original master plan (prompt.txt), carried forward unchanged in
+structure and intent, but annotated with what the backend ACTUALLY does — verified live against
+a running Spring Boot instance and a real Supabase database, not just designed on paper. Where
+the backend deviates from the original spec (skipped phases, endpoints that ended up shaped
+differently, things that don't exist yet), it's called out explicitly so the frontend isn't built
+against a fiction.
+
+Read this alongside `backend/API_DOCUMENTATION.md` (endpoint-by-endpoint reference, request/
+response shapes, RBAC, error format, curl examples) and the live Swagger UI
+(`GET /swagger-ui.html` on the running backend) — this file is the phase roadmap and the "what's
+different from the original design" notes; the API doc is the field-level source of truth.
+
+The backend is complete through Phase 29 (API documentation) of the original plan, with Phase 25
+(Admin + Analytics backend endpoints) explicitly SKIPPED by request. Phase 30 (Deploy Backend)
+and Phases 31-40 (this file) remain.
+
+------------------------------------------------------------
+WHAT CHANGED VS. THE ORIGINAL BACKEND DESIGN (read this first)
+------------------------------------------------------------
+
+1. **Google Calendar OAuth is per-user, not org-wide.** The original Phase 20 spec assumed one
+   shared organizational Google Calendar connection. It was rearchitected mid-project: every
+   candidate, interviewer, and recruiter connects their OWN Google Calendar individually. This
+   directly shapes Phase 32/37 UI — see the new "Settings / Integrations" requirement below.
+
+2. **Phase 25 (Admin + Analytics backend) was skipped.** There is NO
+   `scheduling-configuration` edit endpoint and NO analytics/metrics endpoint (candidate-stage
+   breakdowns, interviewer utilization, scheduling success rate, etc.) on the backend today.
+   Phase 32's "Admin: analytics, scheduling configuration" and Phase 37's "Admin charts" cannot
+   be built against real data yet. Options, in order of preference:
+   - Build the Admin dashboard's user-management and audit-log views only (both have real,
+     working endpoints — `GET /api/users`, `PATCH /api/users/{id}/status`,
+     `GET /api/admin/audit-logs`), and leave an explicit "Coming soon" placeholder for analytics
+     and scheduling-config editing.
+   - If analytics visuals are needed for a demo, derive simple counts client-side from data
+     already fetched for other pages (e.g. candidate stage counts from `GET /api/candidates`)
+     rather than waiting on a backend endpoint that doesn't exist. Don't invent a fake backend
+     call for it.
+
+3. **Notifications have no read/unread tracking.** `GET /api/notifications` returns every
+   notification for the caller, newest first — there is no `is_read` flag, no mark-as-read
+   endpoint. Phase 37's "notification center, unread count" needs a client-side "unread" proxy
+   (e.g. compare against a locally-stored "last seen" timestamp) rather than a real unread count
+   from the server. Say so in the UI copy if precision matters for a demo ("New since your last
+   visit" rather than "3 unread").
+
+4. **The AI endpoints are two calls, not one, and nothing is ever silently booked.**
+   `POST /api/ai/schedule` (interpret + propose) and `POST /api/ai/confirm` (execute the exact
+   proposal, idempotency-keyed) are separate. This matches the original Phase 34 spec's
+   "confirmation" step closely — just be precise that `/schedule` returns a `confirmationRequired`
+   boolean and an `action` object that must be round-tripped byte-for-byte into `/confirm`, not
+   reconstructed from what the UI displays.
+
+5. **`POST /api/interviewers` (create profile) exists**, contrary to what earlier backend
+   documentation implied during development. Admin/Recruiter "add interviewer" UI (implied by
+   Phase 32's admin "users" section) can call it directly — body:
+   `{userId, department, designation, domain, maxInterviewsPerDay}` against an already-registered
+   `INTERVIEWER`-role user.
+
+6. **Pipeline actions beyond the original spec exist and should get UI:**
+   `POST /api/candidates/{id}/withdraw` (candidate or staff withdraws from a pipeline — cancels
+   all future rounds) and `POST /api/jobs/{id}/close` (recruiter/admin closes a job posting).
+   Both fit naturally into Phase 33's candidate/job detail pages.
+
+7. **Interviewer replacement policy `AUTO_SWITCH_IF_QUALIFIED` can bypass confirmation.** If the
+   backend's `scheduling_config.interviewer_replacement_policy` is set to this value, an AI-
+   proposed `SWITCH_INTERVIEWER` action is executed immediately server-side and
+   `confirmationRequired` comes back `false` — the UI must handle "this already happened, here's
+   the result" as a valid response shape from `/schedule`, not assume every action needs a
+   `/confirm` round-trip.
+
+8. **Email notifications are configured but not wired to any specific notification type** — every
+   backend notification today is `IN_APP` only (the `channel` field on `NotificationResponse`
+   will read `IN_APP`, never `EMAIL`, until/unless a future backend change opts specific types
+   into email). Don't build UI copy that promises "we emailed you" based on today's data.
+
+------------------------------------------------------------
+PHASE 31 — FRONTEND FOUNDATION
+------------------------------------------------------------
+Only now build frontend.
+
+Use:
+React
+Vite
+TypeScript
+React Router
+Axios
+Tailwind CSS
+
+Structure:
+src/
+  api
+  auth
+  components
+  layouts
+  pages
+  hooks
+  context
+  types
+  utils
+  routes
+
+Implement:
+- login
+- registration
+- protected routes
+- role-based routes
+- API client
+- JWT handling
+- loading/error states
+- toast/notification system
+
+No business rules in frontend. The backend is the source of truth for every decision (can this
+slot be booked, is this candidate eligible to advance, etc.) — the frontend only calls the API and
+renders what comes back, including errors.
+
+Concretely for THIS backend:
+- `POST /api/auth/register` — body `{name, email, password, role, timezone}`. `role` is one of
+  `ADMIN, RECRUITER, INTERVIEWER, CANDIDATE`, chosen at signup (there's no invite/approval flow on
+  the backend) — a real product would gate ADMIN signup somehow, but nothing stops it server-side
+  today, so if that matters for the demo, enforce it client-side (e.g. don't offer ADMIN in the
+  signup role picker) since the backend won't.
+- `POST /api/auth/login` — returns `{token, tokenType, userId, email, role}`. Store the token
+  (e.g. in memory + `sessionStorage`, not `localStorage` if XSS exposure is a concern for the
+  demo) and attach `Authorization: Bearer <token>` via an Axios interceptor.
+- Every error response is the same shape: `{timestamp, status, error, message, path}` — build one
+  Axios error interceptor / toast handler around this shape rather than per-call error parsing.
+- A `401` means the token is missing/expired — redirect to login and drop the stored token. A
+  `403` means the role or ownership check failed — show a clear "not allowed" state, don't retry.
+
+------------------------------------------------------------
+PHASE 32 — ROLE DASHBOARDS
+------------------------------------------------------------
+Recruiter:
+overview, candidates, jobs, interviews, scheduling, notifications.
+
+Interviewer:
+upcoming interviews, availability, assigned interviews,
+cancel interview, result submission.
+
+Candidate:
+profile, pipeline, upcoming interviews, availability, reschedule.
+
+Admin:
+users, analytics, audit logs, scheduling configuration,
+integration health.
+
+Backend reality for this phase:
+- Admin "analytics" and "scheduling configuration" have no backend endpoint — see item 2 above.
+  Build "users" (`GET /api/users`, `PATCH /api/users/{id}/status`) and "audit logs"
+  (`GET /api/admin/audit-logs`, filterable by `actorId/action/entityType/entityId/dateFrom/dateTo`)
+  for real; placeholder the rest.
+- "Integration health" has no dedicated backend endpoint either. The closest real signal per-user
+  is `GET /api/integrations/google-calendar/status` (their own connection state) — there's no
+  admin-wide view of everyone's calendar connection status. For a genuine admin "integration
+  health" panel, either scope it down to "is AI/calendar configured at all" (inferrable only
+  indirectly — e.g. a failed `/api/ai/schedule` call with a 500 suggests no `AI_API_KEY` is set)
+  or treat it as a Phase 25 gap and skip it.
+- **New requirement not in the original spec**: every role's dashboard needs a way to reach a
+  "Settings / Integrations" page (see Phase 35) with a "Connect Google Calendar" action — this
+  replaces the org-wide connection the original design assumed. Recruiter, Interviewer, and
+  Candidate dashboards should all surface this, since all three roles' calendars matter for
+  scheduling (candidate and interviewer busy-time is factored into slot-finding; a recruiter
+  connecting isn't functionally required but doesn't hurt).
+
+------------------------------------------------------------
+PHASE 33 — CANDIDATE + JOB + PIPELINE UI
+------------------------------------------------------------
+Create:
+- candidate list/detail
+- candidate skills
+- job list/detail
+- job requirements
+- pipeline visualization
+- current stage
+- round status/result
+- **withdraw candidate** action on the candidate detail page (`POST /api/candidates/{id}/withdraw`)
+- **close job** action on the job detail page (`POST /api/jobs/{id}/close`)
+
+Clearly separate candidate status from round status — these are genuinely two different fields
+from two different endpoints and must not be conflated in the UI:
+- Candidate status (`GET /api/candidates/{id}/status` or the `currentStatus` field on
+  `CandidateResponse`): `APPLIED, SCREENING, TECHNICAL, MANAGERIAL, HR, SELECTED, REJECTED,
+  WITHDRAWN, ON_HOLD` — this is the candidate's overall pipeline position.
+- Round status (`InterviewRoundResponse.status`): `PENDING, SCHEDULING, SCHEDULED, IN_PROGRESS,
+  COMPLETED, RESCHEDULE_REQUIRED, CANCELLED` — this is one specific round's lifecycle state, and
+  a round also carries its own separate `result`: `PENDING, PASS, FAIL, HOLD`.
+
+A job's skill list has no create-skill endpoint — `skillId` on `POST /api/jobs/{id}/skills` must
+reference a skill that already exists in the `skills` table (seeded directly on the backend, not
+creatable via API). If the demo needs a new skill that doesn't exist, that's a backend seed-data
+change, not a frontend form.
+
+------------------------------------------------------------
+PHASE 34 — AI + FORM SCHEDULING UI
+------------------------------------------------------------
+Provide two modes:
+
+FORM:
+candidate, job, round, duration, date range, preferred interviewer,
+preferred time, excluded days, required participants.
+
+AI:
+natural-language input.
+
+Example:
+"Schedule Rahul's Java technical interview next week for 60 minutes,
+prefer afternoon and exclude Friday."
+
+Display:
+- interpreted request
+- eligible interviewer
+- recommended slots
+- alternatives
+- reasons
+- conflicts
+- confirmation
+
+Never display a slot as guaranteed until backend booking succeeds.
+
+Backend reality for this phase:
+- FORM mode maps directly to `POST /api/scheduling/recommend`
+  (`SchedulingRequest{candidateId, roundId, preferredInterviewerId?, durationMinutes, dateFrom,
+  dateTo, preferredTimeStart?, preferredTimeEnd?, excludedDays?, requiredParticipantIds?,
+  timezone}` -> `SchedulingResponse{slots, alternatives, reasonCode}`). Then the recruiter picks a
+  slot and the UI calls `POST /api/interviews/{roundId}/book`
+  (`BookingRequest{interviewerId, start, end, timezone, idempotencyKey, additionalParticipantIds?}`)
+  — generate a fresh UUID `idempotencyKey` per booking *attempt* (reuse it only on a genuine retry
+  of the same click, e.g. after a network timeout).
+- AI mode maps to `POST /api/ai/schedule` (`{message}` ->
+  `AiScheduleResponse{interpretedRequest, candidate, round, eligibleInterviewers,
+  recommendedSlots, alternatives, reason, confirmationRequired, action}`), then, on user
+  confirmation, `POST /api/ai/confirm` (`{action, idempotencyKey}` -> `AiConfirmResponse{success,
+  actionType, result, message}`). The `action` object from `/schedule`'s response must be sent
+  back to `/confirm` verbatim — don't let the UI reconstruct it from displayed fields, since it
+  may carry values (e.g. exact `reason` text) the UI doesn't render.
+- If `confirmationRequired` is `false` (the `AUTO_SWITCH_IF_QUALIFIED` case — see item 7 above),
+  there is nothing to confirm; show the result as already-applied, not as a pending proposal.
+- `reasonCode` on an empty-slots response is one of: `NO_CANDIDATE_AVAILABILITY,
+  NO_INTERVIEWER_AVAILABILITY, NO_COMMON_SLOT, NO_QUALIFIED_INTERVIEWER, ALL_SLOTS_CONFLICTED,
+  OUTSIDE_WORKING_HOURS, DATE_RANGE_EXHAUSTED` — map each to a specific, human message rather than
+  a generic "no slots found" (the whole point of the reason code is to be specific).
+- Since the per-user Google OAuth change, both FORM and AI slot results already have each
+  participant's connected Google Calendar busy time subtracted server-side — the frontend doesn't
+  need to (and can't, without literally proxying their calendar) do anything extra for this; it's
+  transparent in the returned slots.
+- `POST /api/interviewers/match` (`{roundId}` -> `MatchInterviewersResponse{eligibleInterviewers,
+  ineligibleInterviewers}`, each `InterviewerMatchResult{interviewerId, userId, name, eligible,
+  failureReasons, score}`) is the "eligible interviewer" data source for the FORM flow if you want
+  to show it before running `/recommend` — `/recommend` internally does its own matching too, so
+  this call is optional (useful for showing *why* someone was excluded via `failureReasons`,
+  which `/recommend`'s output doesn't carry).
+
+------------------------------------------------------------
+PHASE 35 — INTERVIEW/CALENDAR UI
+------------------------------------------------------------
+Create:
+- interview details
+- upcoming interviews
+- calendar view
+- meeting link
+- participants
+- interviewer
+- round
+- date/time/timezone
+- status
+- reschedule
+- cancel
+
+Statuses:
+SCHEDULED
+RESCHEDULE_REQUIRED
+COMPLETED
+CANCELLED
+etc.
+(Full set: `PENDING, SCHEDULING, SCHEDULED, IN_PROGRESS, COMPLETED, RESCHEDULE_REQUIRED,
+CANCELLED` — see Phase 33 note above on not conflating this with candidate status.)
+
+**New page not in the original spec — Settings / Integrations:**
+Required because of the per-user Google OAuth rearchitecture (see "What changed" item 1). Every
+logged-in user (any role) needs:
+- A "Connect Google Calendar" button that calls
+  `GET /api/integrations/google-calendar/authorize` and navigates the browser to the returned
+  `authorizationUrl`.
+- The page must live at the path `/settings/integrations` in the frontend's router EXACTLY —
+  the backend's OAuth callback redirects the browser to
+  `{APP_BASE_URL}/settings/integrations?google=connected` on success or
+  `{APP_BASE_URL}/settings/integrations?google=error&message=...` on failure, where
+  `APP_BASE_URL` is an env var set on the backend to this frontend's deployed origin. Read the
+  `google` and `message` query params on mount to show a one-time success/error toast, then you
+  can strip them from the URL.
+- A connection-status display via `GET /api/integrations/google-calendar/status` ->
+  `GoogleCalendarStatusResponse{activeProvider, connected, connectedEmail, expiresAt}`.
+- There is no "disconnect" endpoint on the backend today — if that's needed for the demo, it's a
+  backend gap to flag, not something to fake client-side.
+
+Meeting link: a booked interview's Google Meet link isn't returned as a dedicated field on
+`BookingResponse`/`InterviewRoundResponse` today — it lives on the underlying Google Calendar
+event. If the UI needs to surface it directly, this is a backend gap (add a `meetingLink` field
+sourced from the calendar event) to flag rather than something derivable purely client-side.
+
+------------------------------------------------------------
+PHASE 36 — CANCELLATION + REPLACEMENT UI
+------------------------------------------------------------
+Interviewer clicks Cancel Interview.
+
+Call:
+POST /api/interviews/{id}/interviewer-cancel
+
+Show:
+"Interview requires rescheduling."
+
+Display:
+- replacement interviewer
+- skill match
+- available slots
+- recommended slot
+- alternatives
+
+Recruiter confirms.
+
+Candidate stage remains unchanged.
+
+Also support candidate/recruiter rescheduling and recruiter cancellation.
+
+Backend reality for this phase:
+- `POST /api/interviews/{id}/interviewer-cancel` (interviewer-only, must be the assigned one) ->
+  `SchedulingResponse` — the round moves to `RESCHEDULE_REQUIRED` and a replacement search runs
+  automatically as part of the same call; the response already contains candidate slots.
+- `POST /api/interviews/{id}/find-replacement` (recruiter/admin) -> `FindReplacementResponse
+  {roundId, roundStatus, currentStart, currentEnd, currentInterviewerId, currentInterviewerName,
+  policy, options}` is the read-only "browse replacement options" call if the recruiter wants to
+  look before committing (distinct from the automatic search above).
+- `POST /api/interviews/{id}/switch-interviewer` (recruiter/admin) — body
+  `{newInterviewerId, start?, end?, timezone?, idempotencyKey}` — is what actually commits a
+  replacement + (optionally) a new slot. This is the endpoint the "recruiter confirms" step in
+  the spec maps to.
+- `POST /api/interviews/{id}/reschedule` (candidate, interviewer, or staff — self-or-staff, no
+  extra role gate beyond that) with an optional body
+  `{reason?, dateFrom?, dateTo?, preferredTimeStart?, preferredTimeEnd?}` handles candidate- or
+  recruiter-initiated rescheduling — it moves the round to `RESCHEDULE_REQUIRED` and immediately
+  returns fresh candidate slots in the same response, same shape as the interviewer-cancel path.
+- `POST /api/interviews/{id}/cancel` (recruiter/admin) is a hard cancel with no auto-reschedule —
+  distinct from `interviewer-cancel`/`reschedule`, which both trigger a replacement/reschedule
+  flow. Use this only for "actually stop this interview," not for "something changed, find a new
+  slot."
+- `POST /api/interviews/{id}/decline` (assigned interviewer) and
+  `POST /api/interviews/{id}/candidate-cancel` (the round's own candidate) are the other two
+  participant-initiated actions — both return the same kind of response shape as
+  interviewer-cancel/reschedule (`decline`) or a plain `InterviewRoundResponse` (`candidate-cancel`,
+  no auto-reschedule, no pipeline progression).
+- Candidate stage genuinely does not change on any of these calls (confirmed against the actual
+  service code) — the UI should reflect that a cancellation/replacement of a round never moves the
+  candidate's pipeline status; only `POST /api/interviews/{id}/result` (a PASS/FAIL submission)
+  does that.
+
+------------------------------------------------------------
+PHASE 37 — NOTIFICATIONS + ADMIN UI
+------------------------------------------------------------
+Create notification center, unread count, reminders, scheduling status,
+replacement messages.
+
+Admin charts:
+- candidate stages
+- interview status
+- rescheduling
+- interviewer utilization
+- scheduling success
+- conflicts
+- calendar failures
+- audit activity
+
+Backend reality for this phase:
+- Notification center: `GET /api/notifications` -> `List<NotificationResponse>
+  {id, userId, interviewRoundId, type, channel, status, sentAt, createdAt}`, already sorted
+  newest-first. `type` values in real use: `INTERVIEW_SCHEDULED, INTERVIEW_RESCHEDULED,
+  INTERVIEW_CANCELLED, INTERVIEWER_CANCELLED, INTERVIEWER_REPLACED,
+  INTERVIEW_INVITATION_DECLINED, INTERVIEW_REMINDER_24H, INTERVIEW_REMINDER_1H`. Map each `type`
+  to its own icon/message template client-side.
+- **Unread count is not a real backend concept** (see "What changed" item 3) — build it as
+  "count of notifications created after the last time this page was opened," stored in
+  `localStorage` per user, not as a literal server-provided unread count.
+- Admin charts: only "audit activity" has real backing data
+  (`GET /api/admin/audit-logs`, filterable). `candidate stages` and `interview status` breakdowns
+  CAN be computed client-side by fetching `GET /api/candidates` / iterating processes and
+  counting by status field — acceptable for a demo since the data itself is real, just not
+  pre-aggregated by the backend. `interviewer utilization`, `scheduling success`, `conflicts`, and
+  `calendar failures` have no backing data or aggregation endpoint at all (Phase 25 gap) — either
+  omit these panels or clearly label them as unavailable rather than fabricating numbers.
+
+------------------------------------------------------------
+PHASE 38 — FRONTEND EDGE CASES
+------------------------------------------------------------
+Handle:
+- expired JWT
+- unauthorized/forbidden
+- not found
+- no interviewer
+- no slot
+- slot taken while booking
+- interviewer cancellation
+- replacement unavailable
+- calendar failure
+- notification failure
+- maximum reschedules
+- rejected candidate
+- cancelled round
+- network failure
+- loading
+- empty state
+
+If a slot becomes unavailable:
+"This slot was just taken. Here are the latest available options."
+Then request fresh slots.
+
+Backend reality for this phase — how each case actually surfaces over the wire:
+- expired/invalid JWT -> `401` with the standard error body; redirect to login.
+- unauthorized (role) or forbidden (ownership) -> `403`; show a static "not allowed" message, do
+  not retry or refresh token (a 403 is not a token problem).
+- not found -> `404` (e.g. a stale candidate/round id).
+- no interviewer / no slot -> NOT an error. `POST /api/scheduling/recommend` and
+  `/api/scheduling/find-slots` return `200` with an empty `slots` array and a `reasonCode`
+  explaining why (see Phase 34's reason-code list) — branch UI on the empty array + reason code,
+  don't treat this as a caught exception.
+- slot taken while booking -> `POST /api/interviews/{id}/book` (or `/switch-interviewer`) returns
+  `422` (`SchedulingException`/`InvalidBookingException`) if the fresh server-side re-check at
+  booking time finds the slot is no longer valid, EVEN IF it was in a `/recommend` response
+  moments earlier — this is expected and by design (see API_DOCUMENTATION.md's idempotency note:
+  never trust a previously-returned slot as still valid). On this specific `422`, re-run
+  `/recommend` and show the "this slot was just taken" message from the original spec verbatim.
+- interviewer cancellation -> see Phase 36; not an error path, a real state transition
+  (`RESCHEDULE_REQUIRED`).
+- replacement unavailable -> `find-replacement`/`switch-interviewer` returning an empty
+  `options` list, or a `422` from `/recommend`'s underlying logic finding nobody qualified — same
+  reason-code-driven empty-state handling as "no slot."
+- calendar failure -> booking still succeeds even if the Google Calendar event creation fails
+  server-side (deliberate — see API_DOCUMENTATION.md's Google Calendar section and backend
+  README's Phase 20 notes); the round is `SCHEDULED` regardless, but there's no dedicated field
+  the frontend can currently check for "calendar sync failed" on the booking response itself —
+  this is only visible via backend logs/audit today, not a value in `BookingResponse`. Flag as a
+  gap if the demo specifically wants to show this failure mode; don't fabricate a status field.
+- notification failure -> similarly best-effort and not surfaced back to the caller of the
+  triggering action; `NotificationResponse.status` (`PENDING, SENT, FAILED`) on
+  `GET /api/notifications` is the only place a failure is visible, and only after the fact.
+- maximum reschedules -> `InterviewRoundResponse.rescheduleCount` exists; the backend enforces a
+  configured maximum (`scheduling_config`) and returns `409` once exceeded — show the count in the
+  UI and a clear error message when the `409` happens.
+- rejected candidate -> `candidateStatus === "REJECTED"`; UI should stop offering scheduling
+  actions for that candidate (the backend will also correctly refuse them, but don't rely on the
+  error path alone — grey out the actions).
+- cancelled round -> `status === "CANCELLED"`; same treatment, no further actions offered.
+- network failure -> generic Axios network-error catch (no response at all) — distinct from a
+  `5xx`; show a retry affordance, don't auto-retry mutating calls (booking, confirm, etc.) without
+  the user re-triggering, since a retry with a NEW idempotency key could double-book if the
+  original request actually succeeded server-side but the response was lost in transit. Reuse the
+  same idempotency key on a user-initiated retry of the same action.
+- loading / empty state — standard, no backend-specific notes beyond: `reasonCode`-empty ≠
+  loading-empty ≠ error-empty; keep these three visually distinct.
+
+------------------------------------------------------------
+PHASE 39 — COMPLETE END-TO-END INTEGRATION
+------------------------------------------------------------
+Run:
+1. Recruiter login
+2. Create candidate
+3. Add candidate skills
+4. Create job
+5. Add job skills
+6. Create process
+7. Configure interviewer skills
+8. Configure availability
+9. Natural-language request
+10. AI interpretation
+11. Qualified interviewer
+12. Slots
+13. UI recommendation
+14. Recruiter confirmation
+15. Fresh backend validation
+16. Booking
+17. Calendar
+18. Meet
+19. Notification
+20. Audit
+21. Interviewer cancellation
+22. RESCHEDULE_REQUIRED
+23. Replacement
+24. New slots
+25. Confirmation
+26. Calendar update
+27. Notifications
+28. Interview completion
+29. PASS/FAIL/HOLD
+
+Also test:
+no slot, interviewer decline, candidate reschedule,
+double booking, calendar failure, future-round invalidation.
+
+Notes specific to this backend when running the above end-to-end:
+- Steps 1-8 require the candidate/interviewer users to already be registered via
+  `POST /api/auth/register` with the right role BEFORE `POST /api/candidates` /
+  `POST /api/interviewers` attach a profile to them — a profile can't be created for a
+  non-existent user id.
+- Step 6 (create process) requires the candidate to have no other ACTIVE process — the backend
+  returns `409` otherwise; a demo script should either use a fresh candidate or ensure any prior
+  process for the same candidate is COMPLETED/REJECTED/CANCELLED first.
+- Steps 9-14 are the two `/api/ai/schedule` + `/api/ai/confirm` calls; this requires
+  `AI_API_KEY` to be set on the backend (an OpenRouter key — see API_DOCUMENTATION.md's Agentic AI
+  section) or the whole AI path 500s. Have the FORM-mode path (step 12-16 without AI) as a fallback
+  demo route in case the AI key/quota isn't available at demo time.
+- Steps 17-18 (Calendar, Meet) require `CALENDAR_PROVIDER=google` plus real
+  `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`/`GOOGLE_REDIRECT_URI` on the backend, AND both the
+  candidate and the assigned interviewer having gone through the "Connect Google Calendar" flow
+  (Phase 35) beforehand — this is the biggest behavioral change from the original spec's org-wide
+  assumption: there is no scenario where calendar/Meet works for a pair of users unless BOTH (or
+  at least the interviewer, since the event is created on the interviewer's calendar — see
+  API_DOCUMENTATION.md) have connected their own account first.
+- "double booking" test: fire two booking requests for the same round concurrently (e.g. two
+  browser tabs) — the backend has real row-level locking and idempotency-key handling for this
+  (verified via an automated concurrent-request test), so exactly one should succeed and the
+  other should get a `409`/`422` rather than both silently succeeding.
+- "future-round invalidation": submitting `FAIL` via `POST /api/interviews/{id}/result` on an
+  earlier round should cascade-cancel every later round in the same process and set the candidate
+  to `REJECTED` — verify this from the UI by checking the later rounds' status after a FAIL.
+
+------------------------------------------------------------
+PHASE 40 — FINAL POLISH + HACKATHON DEMO
+------------------------------------------------------------
+Prepare:
+- README
+- architecture diagram
+- database diagram
+- API documentation
+- environment example
+- demo seed data
+- deployment guide
+- troubleshooting
+- test report
+- security checklist
+- final demo script
+
+API documentation is already done on the backend side — see `backend/API_DOCUMENTATION.md`; the
+frontend README should link to it rather than duplicating it.
+
+FINAL DEMO SCENARIOS:
+
+1. Normal AI scheduling.
+2. Preferred interviewer unavailable.
+3. Interviewer cancellation -> replacement -> new slot.
+4. Slot taken before confirmation.
+5. Interviewer decline -> replacement.
+6. Candidate rescheduling.
+7. Technical FAIL -> REJECTED + future rounds invalidated.
+8. Technical PASS -> MANAGERIAL.
+
+Given the per-user OAuth change, add a 9th recommended scenario if time allows:
+9. A candidate and interviewer who have BOTH connected Google Calendar, one of them with a
+   conflicting personal event in that window — showing that the recommended slots correctly
+   exclude it even though nothing in the application's own `Availability` records reflects it.
+
+FINAL DESIGN STATEMENT:
+
+The system is NOT:
+LLM -> Database -> Booking
+
+The system IS:
+LLM -> Controlled Tools -> Spring Boot Services
+    -> deterministic validation -> Supabase PostgreSQL/external integrations
+
+PostgreSQL stores facts.
+Spring Boot enforces rules.
+AI orchestrates and explains.
+
+This holds exactly as designed: `AiOrchestrationService` only ever calls the SAME
+`InterviewBookingService` / `InterviewReschedulingService` / `InterviewerReplacementService` /
+`InterviewProcessService` methods that the plain REST endpoints call — there is no code path
+where the AI writes to the database directly, and every AI-proposed action is re-validated fresh
+(availability, conflicts, row locks) at confirm time exactly as a direct REST booking call would
+be. The frontend should make this visible in the demo narrative, not just true under the hood —
+e.g. by showing the same "recommended slots" UI component for both FORM and AI modes, reinforcing
+that AI is a second way to reach the same deterministic engine, not a shortcut around it.

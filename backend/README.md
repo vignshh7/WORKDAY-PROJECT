@@ -931,13 +931,14 @@ revision:
 
 ## Agentic AI Orchestration + Confirmation Safety (Phases 26-27, Phase 25 skipped by request)
 
-Uses Spring AI **1.0.0 GA** (`spring-ai-bom` + `spring-ai-starter-model-anthropic`) - deliberately
+Uses Spring AI **1.0.0 GA** (`spring-ai-bom` + `spring-ai-starter-model-openai`) - deliberately
 the line explicitly built for Spring Boot 3.4.x/3.5.x, not the newest Spring AI release (checked
 against Maven Central directly rather than trusting a version number a doc-summarizer surfaced,
-since that specific number turned out not to actually exist as a published artifact). Model id
-defaults to the `claude-3-5-sonnet-latest` alias (`AI_MODEL` env var to override) so it keeps
-resolving to Anthropic's current model without a code change; `AI_API_KEY` is blank by default,
-same "fails at use, not at boot" pattern as `calendar.provider=google`.
+since that specific number turned out not to actually exist as a published artifact). The OpenAI
+starter is used generically, pointed at whichever OpenAI-compatible provider is configured via
+`spring.ai.openai.base-url` — see "Provider" below for why that ended up being OpenRouter rather
+than Anthropic or Gemini directly. `AI_API_KEY`/`AI_MODEL` are blank/defaulted, same "fails at
+use, not at boot" pattern as `calendar.provider=google`.
 
 **The design is literally the spec's own closing statement**: *"LLM -> Controlled Tools -> Spring
 Boot Services -> deterministic validation"*, not *"LLM -> Database -> Booking"*. Concretely, two
@@ -984,19 +985,48 @@ metadata, never actually enforced anywhere) - `AiOrchestrationService` checks th
 the model's proposal and executes it immediately in that one case, exactly the exception Phase 27
 names.
 
-**Verified live** against the real Supabase database and the real Anthropic API (no
-`AI_API_KEY` configured, so the LLM round-trip itself is the one thing not fully verified — see
-below):
-- The app boots cleanly with a blank `AI_API_KEY` (20 repositories, no context-load errors) -
-  the Anthropic autoconfiguration doesn't validate the key at bean-creation time.
-- `POST /api/ai/schedule` as a CANDIDATE correctly `403`s; as ADMIN with no key configured, the
-  request **genuinely reached Anthropic's real API** and came back `401` with Anthropic's own
-  `"x-api-key header is required"` error (visible in the stack trace as
-  `org.springframework.ai.retry.NonTransientAiException: HTTP 401`) - this confirms the
-  `ChatClient`/tool/dependency wiring is fully correct end-to-end; the only missing piece is a
-  real key, not a bug.
-- `POST /api/ai/confirm` was exercised for real, with no LLM involved at all (a `ProposedAction`
-  built by hand, exactly as the model would produce one): `BOOK_INTERVIEW` and
+### Provider: OpenAI-compatible via OpenRouter (not Anthropic, not Gemini directly)
+
+Originally wired against Anthropic (proven end-to-end except the LLM round-trip itself, which
+had no real key available), then against **Gemini** once a real key was provided. Gemini was
+abandoned after live testing hit a real, currently-unresolved ecosystem-wide gap: every Gemini
+model reachable via a fresh API key (all 2.x models are blocked for new users; every 3.x model,
+including the `-latest` aliases, resolves to one) requires a `thought_signature` to be
+round-tripped through multi-turn tool calls, and the generic OpenAI wire protocol Spring AI's
+OpenAI client speaks has nowhere to carry that field —
+`HTTP 400 - Function call is missing a thought_signature in functionCall parts`. This is not
+specific to this project (open issues against VS Code, the OpenAI Python SDK, LiteLLM, and
+open-webui all hit the identical wall as of this writing) and isn't fixable from application
+code. Non-tool-calling requests worked fine on Gemini; tool-calling — the entire point of this
+phase — did not.
+
+Switched to **OpenRouter** (`https://openrouter.ai/api/v1`), a single OpenAI-compatible gateway
+across many providers, defaulting to `nvidia/nemotron-3.5-lightning:free` (confirmed to support
+`tools` in OpenRouter's own model catalog) — `AI_MODEL` can point at any OpenRouter model id.
+**A second real bug found and fixed in the process**: Spring AI's `OpenAiApi` unconditionally
+appends `/v1/chat/completions` to `spring.ai.openai.base-url` (confirmed by inspecting
+`OpenAiApi$Builder`'s bytecode directly, not guessed) — the initial `base-url:
+https://openrouter.ai/api/v1` therefore produced `.../api/v1/v1/chat/completions`, which
+OpenRouter's routing doesn't recognize and silently falls through to their Next.js website's own
+404 page (an HTML page, not a JSON API error, which is what made this obviously wrong rather
+than a plausible auth/model failure). Fixed by trimming `base-url` to `https://openrouter.ai/api`
+so the client's own suffix lands on the correct path.
+
+**Verified live** against the real Supabase database and the real OpenRouter API, with the
+actual key in use — this phase's LLM round-trip is now fully verified, not just "wiring
+confirmed":
+- `POST /api/ai/schedule` with a plain instruction ("reply with the word OK, call no tools")
+  returned a genuine `200` with `{"reason":"OK", "action": null, "confirmationRequired": false}`
+  - the full `ChatClient` → structured-output pipeline works.
+- `POST /api/ai/schedule` asking about a real candidate by name **triggered a real tool call**:
+  the model called `findCandidate`, received the actual database row, and correctly reported
+  that candidate's real live status (`TECHNICAL`) in its structured response - not a guess, the
+  exact value the same candidate's status was independently confirmed as during
+  `AiConfirmIntegrationTest`'s own live run against the same database. This is the first
+  concrete proof of "LLM → Controlled Tools → Spring Boot Services" working end-to-end with a
+  real model in the loop, not just the deterministic side of that pipeline.
+- `POST /api/ai/confirm` was separately exercised for real, with no LLM involved (a
+  `ProposedAction` built by hand, exactly as the model would produce one): `BOOK_INTERVIEW` and
   `ADVANCE_CANDIDATE_TO_NEXT_ROUND` both completed correctly against real data (a genuine
   `SCHEDULED` booking with a calendar event, and a genuine `SCREENING` → `TECHNICAL` pipeline
   progression via `completeRound`+`submitResult(PASS)`); `CANCEL_INTERVIEW` correctly cancelled
@@ -1005,12 +1035,11 @@ below):
   double-progressing the candidate - safe, even though `completeRound`/`submitResult` have no
   idempotency-key concept of their own (only `BOOK_INTERVIEW`/`SWITCH_INTERVIEWER`'s underlying
   services do, per Phase 12).
-- **Not verified**: an actual model-generated `AiScheduleResponse` (tool-calling loop, structured
-  JSON parsing, the system prompt's anti-hallucination instructions actually holding up) and the
+- **Not verified**: a full multi-tool-call chain ending in a populated `action` proposal (the one
+  live test that produced a tool call was a single-tool lookup), and the
   `RESCHEDULE_INTERVIEW`/`SWITCH_INTERVIEWER`/`MARK_CANDIDATE_REJECTED` confirm paths
   specifically (structurally identical to the two confirm paths verified above, delegating to
-  equally-tested Phase 14/16/7 services, but not individually exercised this round) - both need
-  either a real `AI_API_KEY` or more test time than this pass used.
+  equally-tested Phase 14/16/7 services, but not individually exercised this round).
 
 ## Deployment Preparation (later)
 
