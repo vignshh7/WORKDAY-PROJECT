@@ -28,6 +28,7 @@ public class InterviewController {
     private final InterviewProcessService interviewProcessService;
     private final InterviewBookingService interviewBookingService;
     private final InterviewReschedulingService interviewReschedulingService;
+    private final InterviewerCancellationService interviewerCancellationService;
 
     @PostMapping("/{id}/book")
     @PreAuthorize("hasAnyRole('RECRUITER', 'ADMIN')")
@@ -59,5 +60,16 @@ public class InterviewController {
     @PreAuthorize("hasAnyRole('RECRUITER', 'ADMIN')")
     public InterviewRoundResponse cancel(@PathVariable UUID id) {
         return interviewReschedulingService.cancel(id);
+    }
+
+    /**
+     * Phase 15: interviewer-initiated cancellation. Only the assigned INTERVIEWER may call
+     * this. Returns replacement slot recommendations so the recruiter can immediately confirm
+     * a new booking via POST /api/interviews/{id}/book.
+     */
+    @PostMapping("/{id}/interviewer-cancel")
+    @PreAuthorize("hasRole('INTERVIEWER')")
+    public SchedulingResponse interviewerCancel(@PathVariable UUID id) {
+        return interviewerCancellationService.cancelByInterviewer(id);
     }
 }

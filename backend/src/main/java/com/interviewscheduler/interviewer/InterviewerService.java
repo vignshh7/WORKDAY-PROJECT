@@ -8,6 +8,8 @@ import com.interviewscheduler.common.exception.ResourceNotFoundException;
 import com.interviewscheduler.security.SecurityUtils;
 import com.interviewscheduler.security.UserPrincipal;
 import com.interviewscheduler.user.Role;
+import com.interviewscheduler.user.User;
+import com.interviewscheduler.user.UserRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -22,6 +24,32 @@ public class InterviewerService {
     private final InterviewerProfileRepository interviewerProfileRepository;
     private final InterviewerSkillRepository interviewerSkillRepository;
     private final SkillRepository skillRepository;
+    private final UserRepository userRepository;
+
+    @Transactional
+    public InterviewerResponse create(CreateInterviewerProfileRequest request) {
+        requireRecruiterOrAdmin("create interviewer profiles");
+        User user = userRepository.findById(request.userId())
+                .orElseThrow(() -> new ResourceNotFoundException("No user with id: " + request.userId()));
+        if (user.getRole() != Role.INTERVIEWER) {
+            throw new com.interviewscheduler.common.exception.ConflictException(
+                    "User must have INTERVIEWER role to create an interviewer profile");
+        }
+        if (interviewerProfileRepository.findByUserId(request.userId()).isPresent()) {
+            throw new DuplicateResourceException("Interviewer profile already exists for user: " + request.userId());
+        }
+
+        InterviewerProfile profile = new InterviewerProfile();
+        profile.setUser(user);
+        profile.setDepartment(request.department());
+        profile.setDesignation(request.designation());
+        profile.setDomain(request.domain());
+        if (request.maxInterviewsPerDay() != null) {
+            profile.setMaxInterviewsPerDay(request.maxInterviewsPerDay());
+        }
+
+        return InterviewerResponse.from(interviewerProfileRepository.save(profile));
+    }
 
     // readOnly: response mapping reads interviewer.getUser().getName()/getEmail(), lazy relations,
     // same reasoning as CandidateService/JobService.

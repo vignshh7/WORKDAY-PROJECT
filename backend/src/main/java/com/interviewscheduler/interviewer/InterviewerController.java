@@ -23,6 +23,12 @@ public class InterviewerController {
     private final InterviewerService interviewerService;
     private final InterviewerMatchingService interviewerMatchingService;
 
+    @PostMapping
+    @PreAuthorize("hasAnyRole('RECRUITER', 'ADMIN')")
+    public ResponseEntity<InterviewerResponse> create(@Valid @RequestBody CreateInterviewerProfileRequest request) {
+        return ResponseEntity.status(HttpStatus.CREATED).body(interviewerService.create(request));
+    }
+
     @GetMapping
     public List<InterviewerResponse> getAll() {
         return interviewerService.findAll();
