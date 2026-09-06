@@ -10,10 +10,7 @@ import com.interviewscheduler.common.exception.ConflictException;
 import com.interviewscheduler.common.exception.ForbiddenException;
 import com.interviewscheduler.common.exception.ResourceNotFoundException;
 import com.interviewscheduler.integration.CalendarSyncService;
-import com.interviewscheduler.notification.Notification;
-import com.interviewscheduler.notification.NotificationChannel;
-import com.interviewscheduler.notification.NotificationRepository;
-import com.interviewscheduler.notification.NotificationStatus;
+import com.interviewscheduler.notification.NotificationService;
 import com.interviewscheduler.notification.NotificationType;
 import com.interviewscheduler.scheduling.SchedulingRequest;
 import com.interviewscheduler.scheduling.SchedulingResponse;
@@ -52,7 +49,8 @@ public class ParticipantDeclineService {
     private final InterviewParticipantRepository interviewParticipantRepository;
     private final CandidateRepository candidateRepository;
     private final CalendarSyncService calendarSyncService;
-    private final NotificationRepository notificationRepository;
+    private final NotificationService notificationService;
+    private final ReminderService reminderService;
     private final WorkingHoursService workingHoursService;
     private final SchedulingService schedulingService;
     private final AuditService auditService;
@@ -121,6 +119,7 @@ public class ParticipantDeclineService {
         }
 
         calendarSyncService.cancelAll(round.getId());
+        reminderService.invalidateReminders(round.getId());
 
         round.setScheduledStart(null);
         round.setScheduledEnd(null);
@@ -190,6 +189,7 @@ public class ParticipantDeclineService {
 
         calendarSyncService.cancelAll(round.getId());
         removeParticipants(round);
+        reminderService.invalidateReminders(round.getId());
 
         round.setScheduledStart(null);
         round.setScheduledEnd(null);
@@ -234,13 +234,7 @@ public class ParticipantDeclineService {
     }
 
     private void notify(User user, InterviewRound round, NotificationType type) {
-        Notification notification = new Notification();
-        notification.setUser(user);
-        notification.setInterviewRound(round);
-        notification.setType(type);
-        notification.setChannel(NotificationChannel.IN_APP);
-        notification.setStatus(NotificationStatus.PENDING);
-        notificationRepository.save(notification);
+        notificationService.notify(user, round, type);
     }
 
     private List<UUID> otherRequiredParticipantIds(InterviewRound round) {

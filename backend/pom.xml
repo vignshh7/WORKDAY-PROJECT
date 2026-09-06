@@ -54,6 +54,12 @@
       <artifactId>spring-boot-starter-security</artifactId>
     </dependency>
 
+    <!-- Email (wired starting Phase 22; inert unless notification.email.provider=smtp) -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-mail</artifactId>
+    </dependency>
+
     <!-- Persistence: Spring Data JPA + PostgreSQL (wired starting Phase 2) -->
     <dependency>
       <groupId>org.springframework.boot</groupId>

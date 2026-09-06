@@ -41,6 +41,12 @@ spring:
 calendar:
   provider: noop
 
+# Email provider: "noop" (default, logs only) or "smtp" (requires spring.mail.* / SPRING_MAIL_*
+# env vars for the SMTP relay - e.g. SendGrid/Mailgun/Postmark - plus EMAIL_FROM below)
+notification:
+  email:
+    provider: noop
+
 jwt:
   secret: ${JWT_SECRET}
   expiration-minutes: ${JWT_EXPIRATION_MINUTES:1440}

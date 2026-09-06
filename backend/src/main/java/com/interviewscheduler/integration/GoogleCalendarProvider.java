@@ -20,6 +20,9 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
+import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.UUID;
 
@@ -118,8 +121,37 @@ public class GoogleCalendarProvider implements CalendarProvider {
     }
 
     @Override
+    public CalendarEventSnapshot getEvent(String externalEventId) {
+        log.debug("[GOOGLE] getEvent externalId={}", externalEventId);
+        try {
+            Event event = executeWithRetry(token -> client(token).events().get(CALENDAR_ID, externalEventId).execute(),
+                    "getEvent");
+            List<String> declined = event.getAttendees() == null ? List.of()
+                    : event.getAttendees().stream()
+                            .filter(a -> "declined".equals(a.getResponseStatus()))
+                            .map(EventAttendee::getEmail)
+                            .toList();
+            return new CalendarEventSnapshot(true, toOffsetDateTime(event.getStart()), toOffsetDateTime(event.getEnd()),
+                    declined);
+        } catch (CalendarIntegrationException e) {
+            if (e.getCause() instanceof GoogleJsonResponseException gjre && gjre.getStatusCode() == 404) {
+                return CalendarEventSnapshot.notFound();
+            }
+            throw e;
+        }
+    }
+
+    @Override
     public String providerName() {
         return "GOOGLE";
+    }
+
+    private OffsetDateTime toOffsetDateTime(EventDateTime eventDateTime) {
+        DateTime dateTime = eventDateTime == null ? null : eventDateTime.getDateTime();
+        if (dateTime == null) {
+            return null;
+        }
+        return OffsetDateTime.ofInstant(Instant.ofEpochMilli(dateTime.getValue()), ZoneOffset.UTC);
     }
 
     private Event toGoogleEvent(CalendarEventRequest request) {

@@ -5,6 +5,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 
+import java.util.List;
 import java.util.UUID;
 
 /**
@@ -38,6 +39,18 @@ public class NoOpCalendarProvider implements CalendarProvider {
     @Override
     public void cancelEvent(String externalEventId) {
         log.info("[NOOP] cancelEvent externalId={}", externalEventId);
+    }
+
+    /**
+     * No external calendar exists to drift from, so this always reports "unchanged" — a
+     * {@code null} start/end tells {@link CalendarReconciliationService} there's nothing to
+     * compare, rather than falsely claiming the event still exists at exactly the DB's own
+     * recorded time.
+     */
+    @Override
+    public CalendarEventSnapshot getEvent(String externalEventId) {
+        log.debug("[NOOP] getEvent externalId={}", externalEventId);
+        return new CalendarEventSnapshot(true, null, null, List.of());
     }
 
     @Override

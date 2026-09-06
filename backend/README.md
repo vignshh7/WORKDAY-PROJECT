@@ -6,7 +6,7 @@ pipelines, availability, and deterministic interview scheduling. A future Agenti
 will orchestrate this backend through controlled service methods; it will never access the
 database directly.
 
-Status: **Phase 20 complete** (Google OAuth + Calendar + Meet). See [Implementation Phases](#implementation-phases).
+Status: **Phase 24 complete** (audit logging query API). See [Implementation Phases](#implementation-phases).
 
 > Phase numbering follows the project's master prompt (Phase 0–40), which supersedes an
 > earlier, coarser 17-phase draft. Phases 1 and 2 below were built under the old numbering
@@ -194,11 +194,11 @@ Once Swagger is wired (Phase 17): `http://localhost:8080/swagger-ui.html`
 | 18 | Pipeline consistency | ✅ Done |
 | 19 | Calendar provider abstraction | ✅ Done |
 | 20 | Google OAuth + Calendar + Meet | ✅ Done |
-| 21 | Google Calendar webhook + reconciliation | ⏳ Next |
-| 22 | Notifications | Pending |
-| 23 | Reminders | Pending |
-| 24 | Audit logging (service + API) | Pending |
-| 25 | Admin + analytics | Pending |
+| 21 | Google Calendar webhook + reconciliation | ✅ Done |
+| 22 | Notifications | ✅ Done |
+| 23 | Reminders | ✅ Done |
+| 24 | Audit logging (service + API) | ✅ Done |
+| 25 | Admin + analytics | ⏳ Next |
 | 26 | Agentic AI orchestration | Pending |
 | 27 | AI confirmation + safety | Pending |
 | 28 | Complete backend testing | Pending |

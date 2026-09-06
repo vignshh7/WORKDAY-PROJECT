@@ -12,5 +12,9 @@ public enum NotificationType {
     INTERVIEWER_REPLACED,
     INTERVIEW_INVITATION,
     INTERVIEW_INVITATION_DECLINED,
-    INTERVIEW_REMINDER
+    INTERVIEW_REMINDER,
+    /** Phase 23: distinct from the generic {@link #INTERVIEW_REMINDER} so a 24h and a 1h
+     *  reminder for the same round never dedup against each other. */
+    INTERVIEW_REMINDER_24H,
+    INTERVIEW_REMINDER_1H
 }

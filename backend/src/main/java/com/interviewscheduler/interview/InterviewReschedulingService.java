@@ -1,6 +1,7 @@
 package com.interviewscheduler.interview;
 
 import com.interviewscheduler.admin.SchedulingConfig;
+import com.interviewscheduler.audit.ActorType;
 import com.interviewscheduler.audit.AuditAction;
 import com.interviewscheduler.audit.AuditService;
 import com.interviewscheduler.availability.WorkingHoursService;
@@ -11,10 +12,7 @@ import com.interviewscheduler.common.exception.ResourceNotFoundException;
 import com.interviewscheduler.integration.CalendarSyncService;
 import com.interviewscheduler.interviewer.InterviewerProfile;
 import com.interviewscheduler.interviewer.InterviewerProfileRepository;
-import com.interviewscheduler.notification.Notification;
-import com.interviewscheduler.notification.NotificationChannel;
-import com.interviewscheduler.notification.NotificationRepository;
-import com.interviewscheduler.notification.NotificationStatus;
+import com.interviewscheduler.notification.NotificationService;
 import com.interviewscheduler.notification.NotificationType;
 import com.interviewscheduler.scheduling.SchedulingRequest;
 import com.interviewscheduler.scheduling.SchedulingResponse;
@@ -47,10 +45,11 @@ public class InterviewReschedulingService {
     private final InterviewParticipantRepository interviewParticipantRepository;
     private final InterviewerProfileRepository interviewerProfileRepository;
     private final CalendarSyncService calendarSyncService;
-    private final NotificationRepository notificationRepository;
+    private final NotificationService notificationService;
     private final WorkingHoursService workingHoursService;
     private final SchedulingService schedulingService;
     private final AuditService auditService;
+    private final ReminderService reminderService;
 
     /**
      * Candidate stage never changes here (unlike a PASS/FAIL result) - only the round's own
@@ -60,10 +59,28 @@ public class InterviewReschedulingService {
      */
     @Transactional
     public SchedulingResponse reschedule(UUID roundId, RescheduleRequest request) {
-        InterviewRound round = interviewRoundRepository.findByIdForUpdate(roundId)
-                .orElseThrow(() -> new ResourceNotFoundException("No interview round with id: " + roundId));
+        InterviewRound round = loadForUpdate(roundId);
+        assertRescheduleAccess(round.getProcess().getCandidate());
+        UserPrincipal caller = SecurityUtils.currentUser();
+        return doReschedule(round, request, caller.getId(), ActorType.USER);
+    }
+
+    /**
+     * System-initiated variant for triggers with no authenticated human caller - Phase 21's
+     * calendar-webhook reconciliation is the current caller (an external drift was detected:
+     * the event was deleted, its time moved, an attendee declined, or a new conflict emerged).
+     * Skips {@link #assertRescheduleAccess}; otherwise runs the identical reusable flow.
+     */
+    @Transactional
+    public SchedulingResponse rescheduleSystemInitiated(UUID roundId, String reason) {
+        InterviewRound round = loadForUpdate(roundId);
+        RescheduleRequest request = new RescheduleRequest(reason, null, null, null, null);
+        return doReschedule(round, request, null, ActorType.SYSTEM);
+    }
+
+    private SchedulingResponse doReschedule(InterviewRound round, RescheduleRequest request,
+                                             UUID actorId, ActorType actorType) {
         Candidate candidate = round.getProcess().getCandidate();
-        assertRescheduleAccess(candidate);
 
         if (round.getStatus() != RoundStatus.SCHEDULED && round.getStatus() != RoundStatus.RESCHEDULE_REQUIRED) {
             throw new ConflictException("Round is not in a reschedulable state: " + round.getStatus());
@@ -80,6 +97,7 @@ public class InterviewReschedulingService {
         String searchTimezone = round.getTimezone() != null ? round.getTimezone() : candidate.getUser().getTimezone();
 
         cancelExistingCalendarEvents(round);
+        reminderService.invalidateReminders(round.getId());
 
         round.setScheduledStart(null);
         round.setScheduledEnd(null);
@@ -88,7 +106,7 @@ public class InterviewReschedulingService {
         InterviewRound savedRound = interviewRoundRepository.saveAndFlush(round);
 
         notifyParticipants(savedRound, NotificationType.INTERVIEW_RESCHEDULED);
-        auditService.logForCurrentUser(AuditAction.INTERVIEW_RESCHEDULED, "INTERVIEW_ROUND", savedRound.getId(),
+        auditService.log(actorId, actorType, AuditAction.INTERVIEW_RESCHEDULED, "INTERVIEW_ROUND", savedRound.getId(),
                 Map.of("reason", request.reason() == null ? "" : request.reason()));
 
         LocalDate dateFrom = request.dateFrom() != null ? request.dateFrom() : LocalDate.now();
@@ -106,8 +124,7 @@ public class InterviewReschedulingService {
     /** Recruiter-intentional cancellation: CANCELLED, no automatic rescheduling triggered. */
     @Transactional
     public InterviewRoundResponse cancel(UUID roundId) {
-        InterviewRound round = interviewRoundRepository.findByIdForUpdate(roundId)
-                .orElseThrow(() -> new ResourceNotFoundException("No interview round with id: " + roundId));
+        InterviewRound round = loadForUpdate(roundId);
 
         if (round.getStatus() == RoundStatus.COMPLETED || round.getStatus() == RoundStatus.CANCELLED
                 || round.getStatus() == RoundStatus.IN_PROGRESS) {
@@ -116,6 +133,7 @@ public class InterviewReschedulingService {
 
         cancelExistingCalendarEvents(round);
         removeParticipants(round);
+        reminderService.invalidateReminders(round.getId());
 
         round.setStatus(RoundStatus.CANCELLED);
         InterviewRound savedRound = interviewRoundRepository.saveAndFlush(round);
@@ -124,6 +142,11 @@ public class InterviewReschedulingService {
         auditService.logForCurrentUser(AuditAction.INTERVIEW_CANCELLED, "INTERVIEW_ROUND", savedRound.getId(), null);
 
         return InterviewRoundResponse.from(savedRound);
+    }
+
+    private InterviewRound loadForUpdate(UUID roundId) {
+        return interviewRoundRepository.findByIdForUpdate(roundId)
+                .orElseThrow(() -> new ResourceNotFoundException("No interview round with id: " + roundId));
     }
 
     private void assertRescheduleAccess(Candidate candidate) {
@@ -153,15 +176,7 @@ public class InterviewReschedulingService {
         interviewParticipantRepository.findByInterviewRoundId(round.getId()).stream()
                 .map(InterviewParticipant::getUser)
                 .distinct()
-                .forEach(user -> {
-                    Notification notification = new Notification();
-                    notification.setUser(user);
-                    notification.setInterviewRound(round);
-                    notification.setType(type);
-                    notification.setChannel(NotificationChannel.IN_APP);
-                    notification.setStatus(NotificationStatus.PENDING);
-                    notificationRepository.save(notification);
-                });
+                .forEach(user -> notificationService.notify(user, round, type));
     }
 
     private UUID currentInterviewerProfileId(InterviewRound round) {

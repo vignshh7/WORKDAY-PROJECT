@@ -28,6 +28,10 @@ public interface InterviewRoundRepository extends JpaRepository<InterviewRound, 
 
     List<InterviewRound> findByStatus(RoundStatus status);
 
+    /** Phase 23: rounds whose scheduled time falls in a reminder-due window. */
+    List<InterviewRound> findByStatusAndScheduledStartBetween(
+            RoundStatus status, OffsetDateTime windowStart, OffsetDateTime windowEnd);
+
     /**
      * Rounds where the given user is an active (non-removed) participant and the round
      * is already scheduled with a time window overlapping [start, end) — the basis for

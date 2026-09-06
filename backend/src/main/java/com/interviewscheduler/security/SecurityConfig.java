@@ -41,6 +41,9 @@ public class SecurityConfig {
                         // no way to attach our JWT; the one-time `state` param is the CSRF
                         // defense instead (see GoogleOAuthService).
                         .requestMatchers("/api/integrations/google-calendar/callback").permitAll()
+                        // Google's push-notification webhook (Phase 21) - also called directly
+                        // by Google with no JWT; verified instead by a shared channel token.
+                        .requestMatchers("/api/integrations/google-calendar/webhook").permitAll()
                         .requestMatchers("/actuator/health", "/actuator/info").permitAll()
                         .requestMatchers("/v3/api-docs/**", "/swagger-ui/**", "/swagger-ui.html").permitAll()
                         .anyRequest().authenticated())

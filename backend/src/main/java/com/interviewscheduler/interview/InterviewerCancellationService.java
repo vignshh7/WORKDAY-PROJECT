@@ -9,10 +9,7 @@ import com.interviewscheduler.common.exception.ConflictException;
 import com.interviewscheduler.common.exception.ForbiddenException;
 import com.interviewscheduler.common.exception.ResourceNotFoundException;
 import com.interviewscheduler.integration.CalendarSyncService;
-import com.interviewscheduler.notification.Notification;
-import com.interviewscheduler.notification.NotificationChannel;
-import com.interviewscheduler.notification.NotificationRepository;
-import com.interviewscheduler.notification.NotificationStatus;
+import com.interviewscheduler.notification.NotificationService;
 import com.interviewscheduler.notification.NotificationType;
 import com.interviewscheduler.scheduling.SchedulingRequest;
 import com.interviewscheduler.scheduling.SchedulingResponse;
@@ -43,7 +40,8 @@ public class InterviewerCancellationService {
     private final InterviewRoundRepository interviewRoundRepository;
     private final InterviewParticipantRepository interviewParticipantRepository;
     private final CalendarSyncService calendarSyncService;
-    private final NotificationRepository notificationRepository;
+    private final NotificationService notificationService;
+    private final ReminderService reminderService;
     private final WorkingHoursService workingHoursService;
     private final SchedulingService schedulingService;
     private final AuditService auditService;
@@ -105,6 +103,7 @@ public class InterviewerCancellationService {
 
         // Rule 7: cancel existing calendar events
         calendarSyncService.cancelAll(round.getId());
+        reminderService.invalidateReminders(round.getId());
 
         // Rule 5 & 6: round -> RESCHEDULE_REQUIRED, candidate stage unchanged
         round.setScheduledStart(null);
@@ -157,15 +156,7 @@ public class InterviewerCancellationService {
                 .filter(p -> p.getStatus() != ParticipantStatus.REMOVED)
                 .map(InterviewParticipant::getUser)
                 .distinct()
-                .forEach(user -> {
-                    Notification notification = new Notification();
-                    notification.setUser(user);
-                    notification.setInterviewRound(round);
-                    notification.setType(type);
-                    notification.setChannel(NotificationChannel.IN_APP);
-                    notification.setStatus(NotificationStatus.PENDING);
-                    notificationRepository.save(notification);
-                });
+                .forEach(user -> notificationService.notify(user, round, type));
     }
 
     private List<UUID> otherRequiredParticipantIds(InterviewRound round) {

@@ -25,10 +25,7 @@ import com.interviewscheduler.interview.RoundStatus;
 import com.interviewscheduler.interviewer.InterviewerProfile;
 import com.interviewscheduler.interviewer.InterviewerProfileRepository;
 import com.interviewscheduler.interviewer.InterviewerMatchingService;
-import com.interviewscheduler.notification.Notification;
-import com.interviewscheduler.notification.NotificationChannel;
-import com.interviewscheduler.notification.NotificationRepository;
-import com.interviewscheduler.notification.NotificationStatus;
+import com.interviewscheduler.notification.NotificationService;
 import com.interviewscheduler.notification.NotificationType;
 import com.interviewscheduler.user.User;
 import com.interviewscheduler.user.UserRepository;
@@ -89,7 +86,7 @@ public class InterviewBookingService {
     private final InterviewParticipantRepository interviewParticipantRepository;
     private final CalendarEventRepository calendarEventRepository;
     private final CalendarSyncService calendarSyncService;
-    private final NotificationRepository notificationRepository;
+    private final NotificationService notificationService;
     private final UserRepository userRepository;
     private final AvailabilityRepository availabilityRepository;
     private final TimezoneService timezoneService;
@@ -217,12 +214,6 @@ public class InterviewBookingService {
     }
 
     private void notify(User user, InterviewRound round, NotificationType type) {
-        Notification notification = new Notification();
-        notification.setUser(user);
-        notification.setInterviewRound(round);
-        notification.setType(type);
-        notification.setChannel(NotificationChannel.IN_APP);
-        notification.setStatus(NotificationStatus.PENDING);
-        notificationRepository.save(notification);
+        notificationService.notify(user, round, type);
     }
 }

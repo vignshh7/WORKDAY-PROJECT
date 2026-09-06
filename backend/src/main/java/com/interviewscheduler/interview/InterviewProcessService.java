@@ -14,10 +14,7 @@ import com.interviewscheduler.integration.CalendarSyncService;
 import com.interviewscheduler.job.Job;
 import com.interviewscheduler.job.JobRepository;
 import com.interviewscheduler.job.JobStatus;
-import com.interviewscheduler.notification.Notification;
-import com.interviewscheduler.notification.NotificationChannel;
-import com.interviewscheduler.notification.NotificationRepository;
-import com.interviewscheduler.notification.NotificationStatus;
+import com.interviewscheduler.notification.NotificationService;
 import com.interviewscheduler.notification.NotificationType;
 import com.interviewscheduler.security.SecurityUtils;
 import com.interviewscheduler.security.UserPrincipal;
@@ -44,7 +41,8 @@ public class InterviewProcessService {
     private final CandidateRepository candidateRepository;
     private final JobRepository jobRepository;
     private final CalendarSyncService calendarSyncService;
-    private final NotificationRepository notificationRepository;
+    private final NotificationService notificationService;
+    private final ReminderService reminderService;
     private final AuditService auditService;
 
     /**
@@ -216,6 +214,7 @@ public class InterviewProcessService {
     /** Cancels a round's calendar events, removes participants, notifies, and marks the round CANCELLED. */
     void cancelRoundCascade(InterviewRound round, NotificationType notificationType) {
         calendarSyncService.cancelAll(round.getId());
+        reminderService.invalidateReminders(round.getId());
         List<InterviewParticipant> participants = interviewParticipantRepository.findByInterviewRoundId(round.getId());
         for (InterviewParticipant p : participants) {
             if (p.getStatus() != ParticipantStatus.REMOVED) {
@@ -223,13 +222,8 @@ public class InterviewProcessService {
                 interviewParticipantRepository.save(p);
             }
         }
-        participants.stream().map(InterviewParticipant::getUser).distinct().forEach(user -> {
-            Notification n = new Notification();
-            n.setUser(user); n.setInterviewRound(round);
-            n.setType(notificationType); n.setChannel(NotificationChannel.IN_APP);
-            n.setStatus(NotificationStatus.PENDING);
-            notificationRepository.save(n);
-        });
+        participants.stream().map(InterviewParticipant::getUser).distinct()
+                .forEach(user -> notificationService.notify(user, round, notificationType));
         round.setScheduledStart(null);
         round.setScheduledEnd(null);
         round.setStatus(RoundStatus.CANCELLED);

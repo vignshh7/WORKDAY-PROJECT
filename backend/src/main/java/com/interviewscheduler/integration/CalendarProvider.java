@@ -32,6 +32,15 @@ public interface CalendarProvider {
      */
     void cancelEvent(String externalEventId);
 
+    /**
+     * Reads back the current provider-side state of an event — Phase 21's calendar-webhook
+     * reconciliation uses this to detect drift (deleted, time moved, an attendee declined)
+     * since Google's push notification carries no event data, only "something changed."
+     * Returns {@link CalendarEventSnapshot#notFound()} if the event no longer exists at the
+     * provider (treated as success, not an error — mirrors {@link #cancelEvent}'s 404 contract).
+     */
+    CalendarEventSnapshot getEvent(String externalEventId);
+
     /** Short identifier written to {@link CalendarEvent#setProvider}. E.g. "GOOGLE", "NOOP". */
     String providerName();
 }
