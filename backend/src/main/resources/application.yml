@@ -37,6 +37,10 @@ spring:
     locations: classpath:db/migration
     baseline-on-migrate: false
 
+# Calendar provider: "noop" (default, no external calls) or "google" (requires GOOGLE_* env vars)
+calendar:
+  provider: noop
+
 jwt:
   secret: ${JWT_SECRET}
   expiration-minutes: ${JWT_EXPIRATION_MINUTES:1440}

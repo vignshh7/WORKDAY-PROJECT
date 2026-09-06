@@ -9,9 +9,7 @@ import com.interviewscheduler.candidate.CandidateRepository;
 import com.interviewscheduler.common.exception.ConflictException;
 import com.interviewscheduler.common.exception.ForbiddenException;
 import com.interviewscheduler.common.exception.ResourceNotFoundException;
-import com.interviewscheduler.integration.CalendarEvent;
-import com.interviewscheduler.integration.CalendarEventRepository;
-import com.interviewscheduler.integration.CalendarEventStatus;
+import com.interviewscheduler.integration.CalendarSyncService;
 import com.interviewscheduler.notification.Notification;
 import com.interviewscheduler.notification.NotificationChannel;
 import com.interviewscheduler.notification.NotificationRepository;
@@ -53,7 +51,7 @@ public class ParticipantDeclineService {
     private final InterviewRoundRepository interviewRoundRepository;
     private final InterviewParticipantRepository interviewParticipantRepository;
     private final CandidateRepository candidateRepository;
-    private final CalendarEventRepository calendarEventRepository;
+    private final CalendarSyncService calendarSyncService;
     private final NotificationRepository notificationRepository;
     private final WorkingHoursService workingHoursService;
     private final SchedulingService schedulingService;
@@ -122,7 +120,7 @@ public class ParticipantDeclineService {
                     + config.getMaximumReschedules() + ") has already been reached for this round");
         }
 
-        cancelCalendarEvents(round);
+        calendarSyncService.cancelAll(round.getId());
 
         round.setScheduledStart(null);
         round.setScheduledEnd(null);
@@ -190,7 +188,7 @@ public class ParticipantDeclineService {
             throw new ConflictException("Cannot cancel a round with status: " + status);
         }
 
-        cancelCalendarEvents(round);
+        calendarSyncService.cancelAll(round.getId());
         removeParticipants(round);
 
         round.setScheduledStart(null);
@@ -209,15 +207,6 @@ public class ParticipantDeclineService {
     // -------------------------------------------------------------------------
     // helpers
     // -------------------------------------------------------------------------
-
-    private void cancelCalendarEvents(InterviewRound round) {
-        for (CalendarEvent event : calendarEventRepository.findByInterviewRoundId(round.getId())) {
-            if (event.getStatus() != CalendarEventStatus.CANCELLED) {
-                event.setStatus(CalendarEventStatus.CANCELLED);
-                calendarEventRepository.save(event);
-            }
-        }
-    }
 
     private void removeParticipants(InterviewRound round) {
         for (InterviewParticipant p : interviewParticipantRepository.findByInterviewRoundId(round.getId())) {

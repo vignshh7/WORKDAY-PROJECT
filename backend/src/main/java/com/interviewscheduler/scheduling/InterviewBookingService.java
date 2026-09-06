@@ -14,6 +14,7 @@ import com.interviewscheduler.common.idempotency.IdempotencyService;
 import com.interviewscheduler.integration.CalendarEvent;
 import com.interviewscheduler.integration.CalendarEventRepository;
 import com.interviewscheduler.integration.CalendarEventStatus;
+import com.interviewscheduler.integration.CalendarSyncService;
 import com.interviewscheduler.interview.InterviewParticipant;
 import com.interviewscheduler.interview.InterviewParticipantRepository;
 import com.interviewscheduler.interview.InterviewRound;
@@ -87,6 +88,7 @@ public class InterviewBookingService {
     private final InterviewerProfileRepository interviewerProfileRepository;
     private final InterviewParticipantRepository interviewParticipantRepository;
     private final CalendarEventRepository calendarEventRepository;
+    private final CalendarSyncService calendarSyncService;
     private final NotificationRepository notificationRepository;
     private final UserRepository userRepository;
     private final AvailabilityRepository availabilityRepository;
@@ -169,6 +171,7 @@ public class InterviewBookingService {
         calendarEvent.setEndTime(request.end());
         calendarEvent.setStatus(CalendarEventStatus.PENDING);
         CalendarEvent savedEvent = calendarEventRepository.saveAndFlush(calendarEvent);
+        calendarSyncService.syncCreate(savedEvent, calendarSyncService.attendeeEmails(savedRound.getId()));
 
         notify(candidate.getUser(), savedRound, NotificationType.INTERVIEW_SCHEDULED);
         notify(interviewer.getUser(), savedRound, NotificationType.INTERVIEW_SCHEDULED);

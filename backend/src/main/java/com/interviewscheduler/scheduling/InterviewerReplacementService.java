@@ -18,6 +18,7 @@ import com.interviewscheduler.common.idempotency.IdempotencyService;
 import com.interviewscheduler.integration.CalendarEvent;
 import com.interviewscheduler.integration.CalendarEventRepository;
 import com.interviewscheduler.integration.CalendarEventStatus;
+import com.interviewscheduler.integration.CalendarSyncService;
 import com.interviewscheduler.interview.AssignmentType;
 import com.interviewscheduler.interview.InterviewParticipant;
 import com.interviewscheduler.interview.InterviewParticipantRepository;
@@ -77,6 +78,7 @@ public class InterviewerReplacementService {
     private final InterviewerProfileRepository interviewerProfileRepository;
     private final InterviewParticipantRepository interviewParticipantRepository;
     private final CalendarEventRepository calendarEventRepository;
+    private final CalendarSyncService calendarSyncService;
     private final NotificationRepository notificationRepository;
     private final AvailabilityRepository availabilityRepository;
     private final TimezoneService timezoneService;
@@ -337,12 +339,7 @@ public class InterviewerReplacementService {
         interviewParticipantRepository.save(newParticipant);
 
         // Cancel old calendar events
-        for (CalendarEvent event : calendarEventRepository.findByInterviewRoundId(roundId)) {
-            if (event.getStatus() != CalendarEventStatus.CANCELLED) {
-                event.setStatus(CalendarEventStatus.CANCELLED);
-                calendarEventRepository.save(event);
-            }
-        }
+        calendarSyncService.cancelAll(roundId);
 
         // Update round state
         boolean timeChanged = !newStart.equals(round.getScheduledStart());
@@ -360,6 +357,7 @@ public class InterviewerReplacementService {
         calendarEvent.setEndTime(newEnd);
         calendarEvent.setStatus(CalendarEventStatus.PENDING);
         CalendarEvent savedEvent = calendarEventRepository.saveAndFlush(calendarEvent);
+        calendarSyncService.syncCreate(savedEvent, calendarSyncService.attendeeEmails(savedRound.getId()));
 
         // Notify active participants
         Candidate candidate = savedRound.getProcess().getCandidate();

@@ -10,9 +10,7 @@ import com.interviewscheduler.common.exception.DuplicateResourceException;
 import com.interviewscheduler.common.exception.ForbiddenException;
 import com.interviewscheduler.common.exception.InvalidStateTransitionException;
 import com.interviewscheduler.common.exception.ResourceNotFoundException;
-import com.interviewscheduler.integration.CalendarEvent;
-import com.interviewscheduler.integration.CalendarEventRepository;
-import com.interviewscheduler.integration.CalendarEventStatus;
+import com.interviewscheduler.integration.CalendarSyncService;
 import com.interviewscheduler.job.Job;
 import com.interviewscheduler.job.JobRepository;
 import com.interviewscheduler.job.JobStatus;
@@ -45,7 +43,7 @@ public class InterviewProcessService {
     private final InterviewParticipantRepository interviewParticipantRepository;
     private final CandidateRepository candidateRepository;
     private final JobRepository jobRepository;
-    private final CalendarEventRepository calendarEventRepository;
+    private final CalendarSyncService calendarSyncService;
     private final NotificationRepository notificationRepository;
     private final AuditService auditService;
 
@@ -217,12 +215,7 @@ public class InterviewProcessService {
 
     /** Cancels a round's calendar events, removes participants, notifies, and marks the round CANCELLED. */
     void cancelRoundCascade(InterviewRound round, NotificationType notificationType) {
-        for (CalendarEvent event : calendarEventRepository.findByInterviewRoundId(round.getId())) {
-            if (event.getStatus() != CalendarEventStatus.CANCELLED) {
-                event.setStatus(CalendarEventStatus.CANCELLED);
-                calendarEventRepository.save(event);
-            }
-        }
+        calendarSyncService.cancelAll(round.getId());
         List<InterviewParticipant> participants = interviewParticipantRepository.findByInterviewRoundId(round.getId());
         for (InterviewParticipant p : participants) {
             if (p.getStatus() != ParticipantStatus.REMOVED) {

@@ -8,9 +8,7 @@ import com.interviewscheduler.candidate.Candidate;
 import com.interviewscheduler.common.exception.ConflictException;
 import com.interviewscheduler.common.exception.ForbiddenException;
 import com.interviewscheduler.common.exception.ResourceNotFoundException;
-import com.interviewscheduler.integration.CalendarEvent;
-import com.interviewscheduler.integration.CalendarEventRepository;
-import com.interviewscheduler.integration.CalendarEventStatus;
+import com.interviewscheduler.integration.CalendarSyncService;
 import com.interviewscheduler.interviewer.InterviewerProfile;
 import com.interviewscheduler.interviewer.InterviewerProfileRepository;
 import com.interviewscheduler.notification.Notification;
@@ -48,7 +46,7 @@ public class InterviewReschedulingService {
     private final InterviewRoundRepository interviewRoundRepository;
     private final InterviewParticipantRepository interviewParticipantRepository;
     private final InterviewerProfileRepository interviewerProfileRepository;
-    private final CalendarEventRepository calendarEventRepository;
+    private final CalendarSyncService calendarSyncService;
     private final NotificationRepository notificationRepository;
     private final WorkingHoursService workingHoursService;
     private final SchedulingService schedulingService;
@@ -138,12 +136,7 @@ public class InterviewReschedulingService {
     }
 
     private void cancelExistingCalendarEvents(InterviewRound round) {
-        for (CalendarEvent event : calendarEventRepository.findByInterviewRoundId(round.getId())) {
-            if (event.getStatus() != CalendarEventStatus.CANCELLED) {
-                event.setStatus(CalendarEventStatus.CANCELLED);
-                calendarEventRepository.save(event);
-            }
-        }
+        calendarSyncService.cancelAll(round.getId());
     }
 
     /** Frees the interviewer's workload count (Phase 8) - a cancelled round shouldn't count against it. */

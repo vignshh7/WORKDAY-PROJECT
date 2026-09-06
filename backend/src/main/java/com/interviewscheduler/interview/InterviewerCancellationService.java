@@ -8,9 +8,7 @@ import com.interviewscheduler.candidate.Candidate;
 import com.interviewscheduler.common.exception.ConflictException;
 import com.interviewscheduler.common.exception.ForbiddenException;
 import com.interviewscheduler.common.exception.ResourceNotFoundException;
-import com.interviewscheduler.integration.CalendarEvent;
-import com.interviewscheduler.integration.CalendarEventRepository;
-import com.interviewscheduler.integration.CalendarEventStatus;
+import com.interviewscheduler.integration.CalendarSyncService;
 import com.interviewscheduler.notification.Notification;
 import com.interviewscheduler.notification.NotificationChannel;
 import com.interviewscheduler.notification.NotificationRepository;
@@ -44,7 +42,7 @@ public class InterviewerCancellationService {
 
     private final InterviewRoundRepository interviewRoundRepository;
     private final InterviewParticipantRepository interviewParticipantRepository;
-    private final CalendarEventRepository calendarEventRepository;
+    private final CalendarSyncService calendarSyncService;
     private final NotificationRepository notificationRepository;
     private final WorkingHoursService workingHoursService;
     private final SchedulingService schedulingService;
@@ -106,7 +104,7 @@ public class InterviewerCancellationService {
         interviewParticipantRepository.save(participant);
 
         // Rule 7: cancel existing calendar events
-        cancelCalendarEvents(round);
+        calendarSyncService.cancelAll(round.getId());
 
         // Rule 5 & 6: round -> RESCHEDULE_REQUIRED, candidate stage unchanged
         round.setScheduledStart(null);
@@ -152,15 +150,6 @@ public class InterviewerCancellationService {
         }
 
         return response;
-    }
-
-    private void cancelCalendarEvents(InterviewRound round) {
-        for (CalendarEvent event : calendarEventRepository.findByInterviewRoundId(round.getId())) {
-            if (event.getStatus() != CalendarEventStatus.CANCELLED) {
-                event.setStatus(CalendarEventStatus.CANCELLED);
-                calendarEventRepository.save(event);
-            }
-        }
     }
 
     private void notifyParticipants(InterviewRound round, NotificationType type) {
