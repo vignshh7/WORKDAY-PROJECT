@@ -2,8 +2,11 @@ package com.interviewscheduler.interview;
 
 import com.interviewscheduler.scheduling.BookingRequest;
 import com.interviewscheduler.scheduling.BookingResponse;
+import com.interviewscheduler.scheduling.FindReplacementResponse;
 import com.interviewscheduler.scheduling.InterviewBookingService;
+import com.interviewscheduler.scheduling.InterviewerReplacementService;
 import com.interviewscheduler.scheduling.SchedulingResponse;
+import com.interviewscheduler.scheduling.SwitchInterviewerRequest;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -29,6 +32,7 @@ public class InterviewController {
     private final InterviewBookingService interviewBookingService;
     private final InterviewReschedulingService interviewReschedulingService;
     private final InterviewerCancellationService interviewerCancellationService;
+    private final InterviewerReplacementService interviewerReplacementService;
 
     @PostMapping("/{id}/book")
     @PreAuthorize("hasAnyRole('RECRUITER', 'ADMIN')")
@@ -71,5 +75,26 @@ public class InterviewController {
     @PreAuthorize("hasRole('INTERVIEWER')")
     public SchedulingResponse interviewerCancel(@PathVariable UUID id) {
         return interviewerCancellationService.cancelByInterviewer(id);
+    }
+
+    /**
+     * Phase 16: find qualified replacement interviewers, ranked by priority
+     * (BACKUP_SAME_TIME → QUALIFIED_SAME_TIME → QUALIFIED_OTHER_TIME → ANY_FUTURE_SLOT).
+     */
+    @PostMapping("/{id}/find-replacement")
+    @PreAuthorize("hasAnyRole('RECRUITER', 'ADMIN')")
+    public FindReplacementResponse findReplacement(@PathVariable UUID id) {
+        return interviewerReplacementService.findReplacement(id);
+    }
+
+    /**
+     * Phase 16: switch the assigned interviewer. Accepts either the same time slot
+     * (same-time swap) or new start/end times (reschedule + swap). Increments reschedule count.
+     */
+    @PostMapping("/{id}/switch-interviewer")
+    @PreAuthorize("hasAnyRole('RECRUITER', 'ADMIN')")
+    public BookingResponse switchInterviewer(@PathVariable UUID id,
+                                              @Valid @RequestBody SwitchInterviewerRequest request) {
+        return interviewerReplacementService.switchInterviewer(id, request);
     }
 }
