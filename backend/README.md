@@ -103,6 +103,12 @@ Never commit real secrets. `.env` is gitignored.
    **Transaction pooler** (port `6543`). The transaction pooler doesn't support JDBC
    prepared statements the way Hibernate uses them; the direct connection or session pooler
    do.
+   **Note:** the direct connection host (`db.<ref>.supabase.co`) only publishes an IPv6
+   (AAAA) DNS record unless the project has the paid IPv4 add-on — on an IPv4-only network
+   it's simply unreachable (fails as a DNS/connect error, not an auth error). If so, use the
+   **Session pooler** connection string instead (Settings → Database → Connection pooling →
+   Session mode; host like `aws-0-<region>.pooler.supabase.com`, username becomes
+   `postgres.<project-ref>`) — it resolves to a regular IPv4 address.
 4. Build the JDBC URL: `jdbc:postgresql://<host>:<port>/<database>`.
 5. Set `DATABASE_URL`, `DB_USERNAME`, `DB_PASSWORD` in your environment (see
    `.env.example`).
@@ -531,12 +537,17 @@ availability" / "get interviewer availability") without knowing that mapping its
   same-user pair recorded in different timezones is still compared correctly across a
   day-boundary shift.
 
-**Verification:** same constraint as Phases 7-8 — no network route to the configured Supabase
-instance and no local Postgres/Docker in this environment, so this was verified with a clean
-`compile`/`test-compile`/`package` under JDK 21, not a live boot or real HTTP requests.
-**Exercise all four endpoints for real — including a same-timezone overlap, a cross-timezone
-overlap, a DST-transition date, a weekend attempt, and an outside-working-hours attempt —
-before starting Phase 10.**
+**Verified live** against the real Supabase database (via the Session pooler — see
+[Supabase Setup](#supabase-setup)) with real HTTP requests: same-timezone overlap (409),
+a genuine cross-timezone overlap where the raw local times don't overlap but the UTC instants
+do (409) and a non-overlapping cross-timezone sanity check (201), a weekend attempt (409), an
+outside-working-hours attempt (409), an invalid-timezone string (400), an end-before-start
+request (400 — see the `GlobalExceptionHandler` fix below), and self-vs-staff-vs-other
+authorization on all four endpoints. One real bug turned up and was fixed, not left for later:
+`GlobalExceptionHandler`'s validation handler only read `getFieldErrors()`, so a class-level
+constraint like `@ValidAvailabilityWindow` (it applies to the whole record, not one field —
+Spring reports it as a *global* error) fell through to a generic "Validation failed" message
+instead of the specific one. Fixed by also collecting `getGlobalErrors()`.
 
 ## Conflict Detection (Phase 10)
 
@@ -574,12 +585,26 @@ and weekend policy, read from the request's own `OffsetDateTime.toLocalTime()`/`
 so no separate timezone field is needed on the request), and `ROUND_DEPENDENCY_CONFLICT`
 (the round's `dependsOnRound`, if any, isn't `COMPLETED` with a `PASS` result yet).
 
-**Verification:** same constraint as Phases 7-9 — no network route to the configured Supabase
-instance and no local Postgres/Docker in this environment, so this was verified with a clean
-`compile`/`test-compile`/`package` under JDK 21, not a live boot or real HTTP requests.
-**Exercise every scenario the spec lists by name — exact overlap, partial overlap, contained
-overlap, adjacent meetings, a buffer violation, no conflict, and a cross-timezone pair — against
-a real database before starting Phase 11.**
+**Verified live** against the real Supabase database with real HTTP requests, seeding a
+`SCHEDULED` round (plus its `interview_participants` and a `calendar_events` row — nothing
+populates these yet since booking is Phase 12) and checking a second round in the same
+process against it: exact overlap, partial overlap, and contained overlap all correctly
+produced `CANDIDATE_CONFLICT`/`INTERVIEWER_CONFLICT` plus `CALENDAR_CONFLICT`; two meetings
+touching with zero gap and a 5-minute gap both correctly produced `BUFFER_CONFLICT` instead;
+a 20-minute gap (clear of the 15-minute buffer) produced no conflict. Also verified
+`INVALID_TIME_RANGE`, `NOTICE_PERIOD_CONFLICT`, `WORKING_HOURS_CONFLICT`, and
+`ROUND_DEPENDENCY_CONFLICT` independently.
+
+**One real bug turned up and was fixed:** Jackson's `OffsetDateTime` deserialization
+defaults to normalizing the incoming value to the context (UTC) zone — `"10:00:00+05:30"`
+silently became `04:30 Z` (the same instant, but a different `toLocalTime()`), so
+`WORKING_HOURS_CONFLICT`'s check against the request's own local time was comparing the
+wrong wall-clock value entirely (a 10:00 IST request read as 04:30, and a 20:00 IST request
+read as 14:30 — both misjudged). Fixed globally in `application.yml`
+(`spring.jackson.deserialization.adjust-dates-to-context-time-zone: false`) rather than
+threading a timezone field through every `OffsetDateTime`-carrying DTO — every comparison
+elsewhere in the codebase uses instant semantics (`isBefore`/`isAfter`), which are
+offset-representation-independent and were never affected.
 
 ## Deployment Preparation (later)
 

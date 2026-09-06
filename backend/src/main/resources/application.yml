@@ -13,6 +13,14 @@ spring:
       maximum-pool-size: 10
       minimum-idle: 2
 
+  jackson:
+    deserialization:
+      # Jackson defaults to normalizing an incoming OffsetDateTime's zone to the context
+      # (UTC) zone, which silently turns "10:00+05:30" into "04:30Z" - same instant, but any
+      # code reading .toLocalTime()/.toLocalDate() (working-hours/weekend checks) would see
+      # the wrong wall-clock value. Keep whatever offset the client actually sent.
+      adjust-dates-to-context-time-zone: false
+
   jpa:
     open-in-view: false
     hibernate:
