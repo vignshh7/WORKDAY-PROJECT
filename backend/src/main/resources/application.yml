@@ -37,6 +37,22 @@ spring:
     locations: classpath:db/migration
     baseline-on-migrate: false
 
+  ai:
+    # Only Anthropic is on the classpath, but this pins it explicitly rather than relying on
+    # "one provider present" auto-selection.
+    model:
+      chat: anthropic
+    anthropic:
+      # Blank by default - the app boots fine either way (same "fails at use, not at boot"
+      # pattern as calendar.provider=google / notification.email.provider=smtp); only
+      # POST /api/ai/schedule actually needs a real key.
+      api-key: ${AI_API_KEY:}
+      chat:
+        options:
+          # An alias, not a dated snapshot, so it keeps resolving to Anthropic's current model
+          # without needing a code change - override via AI_MODEL for a pinned/newer model.
+          model: ${AI_MODEL:claude-3-5-sonnet-latest}
+
 # Calendar provider: "noop" (default, no external calls) or "google" (requires GOOGLE_* env vars)
 calendar:
   provider: noop

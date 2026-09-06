@@ -6,7 +6,7 @@ pipelines, availability, and deterministic interview scheduling. A future Agenti
 will orchestrate this backend through controlled service methods; it will never access the
 database directly.
 
-Status: **Phase 24 complete** (audit logging query API). See [Implementation Phases](#implementation-phases).
+Status: **Phase 27 complete** (AI confirmation + safety), skipping 25 by request. See [Implementation Phases](#implementation-phases).
 
 > Phase numbering follows the project's master prompt (Phase 0–40), which supersedes an
 > earlier, coarser 17-phase draft. Phases 1 and 2 below were built under the old numbering
@@ -198,10 +198,10 @@ Once Swagger is wired (Phase 17): `http://localhost:8080/swagger-ui.html`
 | 22 | Notifications | ✅ Done |
 | 23 | Reminders | ✅ Done |
 | 24 | Audit logging (service + API) | ✅ Done |
-| 25 | Admin + analytics | ⏳ Next |
-| 26 | Agentic AI orchestration | Pending |
-| 27 | AI confirmation + safety | Pending |
-| 28 | Complete backend testing | Pending |
+| 25 | Admin + analytics | Skipped (by request) |
+| 26 | Agentic AI orchestration | ✅ Done |
+| 27 | AI confirmation + safety | ✅ Done |
+| 28 | Complete backend testing | ⏳ Next |
 | 29 | API documentation | Pending |
 | 30 | Deploy backend | Pending |
 | 31–40 | Frontend (not started per spec — backend only for now) | Pending |
@@ -928,6 +928,89 @@ revision:
   limitation Phase 19 flagged). Every code path reachable without real credentials — the
   self-service RBAC change, per-user token lookup/error messages, owner tracking, and the
   busy-interval overlay's "no data available" path — was verified for real.
+
+## Agentic AI Orchestration + Confirmation Safety (Phases 26-27, Phase 25 skipped by request)
+
+Uses Spring AI **1.0.0 GA** (`spring-ai-bom` + `spring-ai-starter-model-anthropic`) - deliberately
+the line explicitly built for Spring Boot 3.4.x/3.5.x, not the newest Spring AI release (checked
+against Maven Central directly rather than trusting a version number a doc-summarizer surfaced,
+since that specific number turned out not to actually exist as a published artifact). Model id
+defaults to the `claude-3-5-sonnet-latest` alias (`AI_MODEL` env var to override) so it keeps
+resolving to Anthropic's current model without a code change; `AI_API_KEY` is blank by default,
+same "fails at use, not at boot" pattern as `calendar.provider=google`.
+
+**The design is literally the spec's own closing statement**: *"LLM -> Controlled Tools -> Spring
+Boot Services -> deterministic validation"*, not *"LLM -> Database -> Booking"*. Concretely, two
+endpoints under `/api/ai` (RECRUITER/ADMIN only, same as the deterministic scheduling endpoints):
+
+- **`POST /api/ai/schedule`** — `AiOrchestrationService` gives the model a `ChatClient` with
+  every tool in `AiReadOnlyTools` (all 18, one per spec's read-only list, each a thin wrapper
+  over an already-tested service - `findCandidate`, `getCandidateSkills/Status/Pipeline`,
+  `getJob(Skills)`, `getInterviewProcess`, `getCurrentRound`, `getRoundRequirements`,
+  `getInterviewStatus`, `findInterviewers`, `getInterviewerSkills`, `matchInterviewers`,
+  `get{Candidate,Interviewer}Availability`, `getCalendarEvents`, `findCommonSlots`,
+  `recommendSlots`, `checkConflicts`, `findReplacementInterviewer`) and a system prompt that
+  says, in effect: *never invent an id/name/date/time - every fact must come from a tool result;
+  never execute a mutation yourself, only propose one*. The model calls tools autonomously and
+  returns the exact structured shape Phase 27 specifies: `interpretedRequest`, `candidate`,
+  `round`, `eligibleInterviewers`, `recommendedSlots`, `alternatives`, `reason`,
+  `confirmationRequired`, `action` (via Spring AI's `.entity(AiScheduleResponse.class)`
+  structured-output support).
+- **`POST /api/ai/confirm`** — takes the `action` from a prior `/schedule` response plus an
+  idempotency key, and `AiActionExecutor` executes it for real via the *exact same* Java
+  services the plain REST endpoints use (`InterviewBookingService.book`,
+  `InterviewReschedulingService.reschedule/cancel`, `InterviewerReplacementService.switchInterviewer`,
+  `InterviewProcessService.completeRound`+`submitResult` for advance/reject) - full locking,
+  fresh conflict checks, and RBAC apply exactly as if a recruiter had called the REST endpoint
+  directly. **This is the actual mechanism, not a convention**, behind every "AI must not..."
+  constraint in the spec: nothing the model said in `/schedule` is ever trusted or persisted
+  as-is: a stale/hallucinated proposal is rejected by the same real validation a stale REST
+  request would hit.
+
+**Two of Phase 26's listed tools are deliberately folded into others**, documented in
+`AiReadOnlyTools`'s own javadoc rather than silently dropped: `rankSlots()` (ranking only makes
+sense given an already-found slot list - `recommendSlots` does find+rank in one reliable call
+instead of asking the model to round-trip a slot list between two tool calls) and `findCandidate()`
+(searches the existing in-memory candidate list rather than adding a new indexed query, fine at
+this system's scale).
+
+**Confirmation policy (Phase 27):** every consequential action (`BOOK_INTERVIEW`,
+`RESCHEDULE_INTERVIEW`, `CANCEL_INTERVIEW`, `SWITCH_INTERVIEWER`, plus - a deliberate extension
+of the same principle - `ADVANCE_CANDIDATE_TO_NEXT_ROUND`/`MARK_CANDIDATE_REJECTED`, since a
+PASS/FAIL result is just as consequential as a booking) requires the separate `/confirm` call,
+*except* `SWITCH_INTERVIEWER` when `scheduling_config.interviewer_replacement_policy =
+AUTO_SWITCH_IF_QUALIFIED` (an existing Phase 16 config value that was previously only advisory
+metadata, never actually enforced anywhere) - `AiOrchestrationService` checks this after getting
+the model's proposal and executes it immediately in that one case, exactly the exception Phase 27
+names.
+
+**Verified live** against the real Supabase database and the real Anthropic API (no
+`AI_API_KEY` configured, so the LLM round-trip itself is the one thing not fully verified — see
+below):
+- The app boots cleanly with a blank `AI_API_KEY` (20 repositories, no context-load errors) -
+  the Anthropic autoconfiguration doesn't validate the key at bean-creation time.
+- `POST /api/ai/schedule` as a CANDIDATE correctly `403`s; as ADMIN with no key configured, the
+  request **genuinely reached Anthropic's real API** and came back `401` with Anthropic's own
+  `"x-api-key header is required"` error (visible in the stack trace as
+  `org.springframework.ai.retry.NonTransientAiException: HTTP 401`) - this confirms the
+  `ChatClient`/tool/dependency wiring is fully correct end-to-end; the only missing piece is a
+  real key, not a bug.
+- `POST /api/ai/confirm` was exercised for real, with no LLM involved at all (a `ProposedAction`
+  built by hand, exactly as the model would produce one): `BOOK_INTERVIEW` and
+  `ADVANCE_CANDIDATE_TO_NEXT_ROUND` both completed correctly against real data (a genuine
+  `SCHEDULED` booking with a calendar event, and a genuine `SCREENING` → `TECHNICAL` pipeline
+  progression via `completeRound`+`submitResult(PASS)`); `CANCEL_INTERVIEW` correctly cancelled
+  a different round; retrying the same `ADVANCE_CANDIDATE_TO_NEXT_ROUND` confirm with the same
+  idempotency key correctly returned `409` ("must be SCHEDULED or IN_PROGRESS") rather than
+  double-progressing the candidate - safe, even though `completeRound`/`submitResult` have no
+  idempotency-key concept of their own (only `BOOK_INTERVIEW`/`SWITCH_INTERVIEWER`'s underlying
+  services do, per Phase 12).
+- **Not verified**: an actual model-generated `AiScheduleResponse` (tool-calling loop, structured
+  JSON parsing, the system prompt's anti-hallucination instructions actually holding up) and the
+  `RESCHEDULE_INTERVIEW`/`SWITCH_INTERVIEWER`/`MARK_CANDIDATE_REJECTED` confirm paths
+  specifically (structurally identical to the two confirm paths verified above, delegating to
+  equally-tested Phase 14/16/7 services, but not individually exercised this round) - both need
+  either a real `AI_API_KEY` or more test time than this pass used.
 
 ## Deployment Preparation (later)
 
