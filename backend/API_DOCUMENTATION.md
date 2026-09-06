@@ -207,6 +207,13 @@ and against overlapping with the user's own existing windows (computed on real U
 cross-timezone overlaps are caught correctly). `UNAVAILABLE` windows skip those checks (they only
 narrow availability, never claim bookability).
 
+**These manual entries only matter for a user who has NOT connected Google Calendar.** Once a
+user connects Google (`CALENDAR_PROVIDER=google` and a token exists for them), their availability
+for slot-finding is computed instead of declared — see the note at the end of the Scheduling
+section below — and their manual `Availability` rows are no longer read for that purpose (the
+endpoints above still work normally, the data just stops being consulted by the scheduling
+engine for a connected user).
+
 ## Scheduling (deterministic engine)
 
 All RECRUITER/ADMIN only. This is the "find a slot" pipeline (Phase 9-11) — read-only, nothing
@@ -241,9 +248,23 @@ curl -X POST http://localhost:8080/api/scheduling/recommend \
   }'
 ```
 
-Since Phase 20, `find-slots`/`recommend` also subtract each participant's connected Google
-Calendar busy time (if they've connected one) on top of the app's own `Availability` records —
-transparent to the caller, same request/response shape either way.
+**How a participant's "available windows" are computed** (candidate, each eligible interviewer,
+and any required participant are all resolved the same way):
+- **Connected to Google Calendar** (`CALENDAR_PROVIDER=google` and they've completed
+  `/authorize`): availability = the organization's configured working hours
+  (`scheduling_config.working_start`/`working_end`, weekend policy), expressed in **that user's
+  own stored timezone** (`users.timezone`, set at registration or via `PUT /api/users/{id}`),
+  minus whatever Google's `freebusy.query` reports as busy for them in the requested date range.
+  Their manual `Availability` rows are not consulted at all in this case.
+- **Not connected**: falls back to their manual `Availability` `AVAILABLE` rows exactly as
+  before Phase 20 — this is the only case where `POST /api/availability` entries actually feed
+  the scheduling engine.
+
+Either way, the result is transparent to the caller — same request/response shape, and the
+existing common-window intersection (candidate ∩ interviewer ∩ required participants) applies
+identically regardless of which source each individual participant's windows came from. A
+Google lookup failure (expired/revoked token, API error) never blocks scheduling — it's treated
+as "no extra busy data," same as never having connected.
 
 ## Interviews (booking, cancellation, rescheduling, replacement)
 

@@ -243,10 +243,18 @@ Backend reality for this phase:
   NO_INTERVIEWER_AVAILABILITY, NO_COMMON_SLOT, NO_QUALIFIED_INTERVIEWER, ALL_SLOTS_CONFLICTED,
   OUTSIDE_WORKING_HOURS, DATE_RANGE_EXHAUSTED` — map each to a specific, human message rather than
   a generic "no slots found" (the whole point of the reason code is to be specific).
-- Since the per-user Google OAuth change, both FORM and AI slot results already have each
-  participant's connected Google Calendar busy time subtracted server-side — the frontend doesn't
-  need to (and can't, without literally proxying their calendar) do anything extra for this; it's
-  transparent in the returned slots.
+- Since the per-user Google OAuth change, a participant's availability is computed differently
+  depending on whether they've connected: connected users get working-hours-in-their-own-timezone
+  minus Google busy time (their manual `Availability` rows are ignored); non-connected users use
+  their manual `Availability` rows as before. Both FORM and AI slot results already reflect this
+  server-side — the frontend doesn't need to (and can't, without literally proxying their
+  calendar) do anything extra for it; it's transparent in the returned slots. The one UI
+  implication: a connected candidate/interviewer no longer needs to fill in `Availability` at all
+  for slots to be found for them — "Connect Google Calendar" (Phase 35) alone is enough, since
+  connecting supplies both their free/busy signal AND (via their stored `timezone`) how the
+  organization's working hours map onto their day. Consider surfacing this directly in Settings/
+  Integrations copy ("Connect your calendar and we'll find times automatically — no need to set
+  availability by hand") so it isn't a hidden behavior.
 - `POST /api/interviewers/match` (`{roundId}` -> `MatchInterviewersResponse{eligibleInterviewers,
   ineligibleInterviewers}`, each `InterviewerMatchResult{interviewerId, userId, name, eligible,
   failureReasons, score}`) is the "eligible interviewer" data source for the FORM flow if you want

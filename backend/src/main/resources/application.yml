@@ -65,15 +65,25 @@ spring:
         options:
           model: ${AI_MODEL:nvidia/nemotron-3.5-lightning:free}
 
-# Calendar provider: "noop" (default, no external calls) or "google" (requires GOOGLE_* env vars)
+# Base URL of the deployed frontend (e.g. https://app.example.com), no trailing slash. Blank by
+# default (no frontend yet) - see GoogleCalendarOAuthController's javadoc for the one place this
+# is read: it turns the Google OAuth callback into a redirect back into the frontend's own UI
+# instead of a bare backend HTML/JSON response.
+app:
+  base-url: ${APP_BASE_URL:}
+
+# Calendar provider: "noop" (default, no external calls) or "google" (requires GOOGLE_CLIENT_ID/
+# GOOGLE_CLIENT_SECRET/GOOGLE_REDIRECT_URI - see .env.example). Env-var-driven, like AI_MODEL
+# above, so flipping to real Google Calendar needs no code/yaml change, just CALENDAR_PROVIDER=google.
 calendar:
-  provider: noop
+  provider: ${CALENDAR_PROVIDER:noop}
 
 # Email provider: "noop" (default, logs only) or "smtp" (requires spring.mail.* / SPRING_MAIL_*
-# env vars for the SMTP relay - e.g. SendGrid/Mailgun/Postmark - plus EMAIL_FROM below)
+# env vars for the SMTP relay - e.g. Gmail/SendGrid/Mailgun/Postmark - plus EMAIL_FROM below).
+# Env-var-driven: set NOTIFICATION_EMAIL_PROVIDER=smtp once SPRING_MAIL_* are configured.
 notification:
   email:
-    provider: noop
+    provider: ${NOTIFICATION_EMAIL_PROVIDER:noop}
 
 jwt:
   secret: ${JWT_SECRET}

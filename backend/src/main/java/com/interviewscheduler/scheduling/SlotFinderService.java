@@ -9,17 +9,22 @@ import com.interviewscheduler.candidate.Candidate;
 import com.interviewscheduler.candidate.CandidateRepository;
 import com.interviewscheduler.common.exception.ResourceNotFoundException;
 import com.interviewscheduler.integration.CalendarBusyTimeService;
+import com.interviewscheduler.integration.GoogleOAuthTokenService;
 import com.interviewscheduler.interview.InterviewRound;
 import com.interviewscheduler.interview.InterviewRoundRepository;
 import com.interviewscheduler.interviewer.InterviewerMatchResult;
 import com.interviewscheduler.interviewer.InterviewerMatchingService;
+import com.interviewscheduler.user.User;
+import com.interviewscheduler.user.UserRepository;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.DayOfWeek;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
@@ -54,6 +59,11 @@ public class SlotFinderService {
     private final SchedulabilityGuard schedulabilityGuard;
     private final ParticipantRoleResolver participantRoleResolver;
     private final CalendarBusyTimeService calendarBusyTimeService;
+    private final GoogleOAuthTokenService googleOAuthTokenService;
+    private final UserRepository userRepository;
+
+    @Value("${calendar.provider:noop}")
+    private String activeCalendarProvider;
 
     @Transactional(readOnly = true)
     public SchedulingResponse findSlots(SchedulingRequest request) {
@@ -211,26 +221,48 @@ public class SlotFinderService {
     }
 
     /**
-     * The app's own {@code Availability} records for this user, minus any busy time read back
-     * from their connected Google Calendar (if any) - see {@link CalendarBusyTimeService} for
-     * why a missing/failed Google lookup never blocks this, only narrows it when data exists.
+     * A user connected to Google Calendar gets their availability computed, not declared: the
+     * organization's configured working hours (scheduling_config), expressed in that specific
+     * user's own stored timezone, minus whatever their Google Calendar reports as busy in that
+     * window - manual {@code Availability} rows are neither required nor consulted for them,
+     * since a connected calendar is a strictly more complete and lower-effort source of truth.
+     * A user who hasn't connected falls back to the pre-Phase-20 manual-entry path (their own
+     * declared {@code Availability} AVAILABLE rows) - there is no other source of their free time.
      * Called for the candidate, every required participant, and each eligible interviewer, so
      * "combine both with application availability... find only slots valid for both" falls out
      * of the existing common-window intersection below without any special-casing per role.
      */
     private List<TimezoneService.TimeRange> availableWindowsFor(UUID userId, SchedulingRequest request) {
-        List<TimezoneService.TimeRange> appWindows = availabilityRepository
+        if ("google".equalsIgnoreCase(activeCalendarProvider)
+                && googleOAuthTokenService.currentConnection(userId).isPresent()) {
+            return workingHoursMinusGoogleBusy(userId, request);
+        }
+        return availabilityRepository
                 .findByUserIdAndDateBetween(userId, request.dateFrom(), request.dateTo())
                 .stream()
                 .filter(a -> a.getStatus() == AvailabilityStatus.AVAILABLE)
                 .map(a -> timezoneService.toUtcRange(a.getDate(), a.getStartTime(), a.getEndTime(), a.getTimezone()))
                 .sorted(Comparator.comparing(TimezoneService.TimeRange::start))
                 .toList();
-        if (appWindows.isEmpty()) {
-            return appWindows;
+    }
+
+    /** Work-hours windows (one per eligible day in the request's date range, in this user's own
+     * timezone) minus their Google Calendar busy time - see {@link #availableWindowsFor}. */
+    private List<TimezoneService.TimeRange> workingHoursMinusGoogleBusy(UUID userId, SchedulingRequest request) {
+        String zoneId = userRepository.findById(userId).map(User::getTimezone).orElse("UTC");
+        SchedulingConfig config = workingHoursService.currentConfig();
+        List<TimezoneService.TimeRange> windows = new ArrayList<>();
+        for (LocalDate date = request.dateFrom(); !date.isAfter(request.dateTo()); date = date.plusDays(1)) {
+            if (workingHoursService.isWeekend(date) && !config.isAllowWeekends()) {
+                continue;
+            }
+            windows.add(timezoneService.toUtcRange(date, config.getWorkingStart(), config.getWorkingEnd(), zoneId));
+        }
+        if (windows.isEmpty()) {
+            return windows;
         }
         List<TimezoneService.TimeRange> busy = googleBusyWindows(userId, request);
-        return busy.isEmpty() ? appWindows : subtractBusy(appWindows, busy);
+        return busy.isEmpty() ? windows : subtractBusy(windows, busy);
     }
 
     private List<TimezoneService.TimeRange> googleBusyWindows(UUID userId, SchedulingRequest request) {
