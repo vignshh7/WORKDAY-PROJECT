@@ -3,6 +3,7 @@ package com.interviewscheduler.interview;
 import com.interviewscheduler.scheduling.BookingRequest;
 import com.interviewscheduler.scheduling.BookingResponse;
 import com.interviewscheduler.scheduling.InterviewBookingService;
+import com.interviewscheduler.scheduling.SchedulingResponse;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -26,6 +27,7 @@ public class InterviewController {
 
     private final InterviewProcessService interviewProcessService;
     private final InterviewBookingService interviewBookingService;
+    private final InterviewReschedulingService interviewReschedulingService;
 
     @PostMapping("/{id}/book")
     @PreAuthorize("hasAnyRole('RECRUITER', 'ADMIN')")
@@ -44,5 +46,18 @@ public class InterviewController {
     @PreAuthorize("hasAnyRole('RECRUITER', 'ADMIN')")
     public InterviewRoundResponse submitResult(@PathVariable UUID id, @Valid @RequestBody RoundResultRequest request) {
         return interviewProcessService.submitResult(id, request);
+    }
+
+    @PostMapping("/{id}/reschedule")
+    public SchedulingResponse reschedule(@PathVariable UUID id,
+                                          @RequestBody(required = false) RescheduleRequest request) {
+        return interviewReschedulingService.reschedule(id, request == null
+                ? new RescheduleRequest(null, null, null, null, null) : request);
+    }
+
+    @PostMapping("/{id}/cancel")
+    @PreAuthorize("hasAnyRole('RECRUITER', 'ADMIN')")
+    public InterviewRoundResponse cancel(@PathVariable UUID id) {
+        return interviewReschedulingService.cancel(id);
     }
 }

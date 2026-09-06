@@ -6,7 +6,7 @@ pipelines, availability, and deterministic interview scheduling. A future Agenti
 will orchestrate this backend through controlled service methods; it will never access the
 database directly.
 
-Status: **Phase 13 complete** (normal recruiter scheduling, wired end-to-end). See [Implementation Phases](#implementation-phases).
+Status: **Phase 14 complete** (reusable rescheduling engine). See [Implementation Phases](#implementation-phases).
 
 > Phase numbering follows the project's master prompt (Phase 0–40), which supersedes an
 > earlier, coarser 17-phase draft. Phases 1 and 2 below were built under the old numbering
@@ -187,8 +187,8 @@ Once Swagger is wired (Phase 17): `http://localhost:8080/swagger-ui.html`
 | 11 | Slot finding + ranking | ✅ Done |
 | 12 | Booking + concurrency + idempotency | ✅ Done |
 | 13 | Normal recruiter scheduling (wiring) | ✅ Done |
-| 14 | Reusable rescheduling engine | ⏳ Next |
-| 15 | Interviewer cancellation | Pending |
+| 14 | Reusable rescheduling engine | ✅ Done |
+| 15 | Interviewer cancellation | ⏳ Next |
 | 16 | Backup + replacement | Pending |
 | 17 | Participant decline + rescheduling | Pending |
 | 18 | Pipeline consistency | Pending |
@@ -786,6 +786,53 @@ the literal English sentence in the example into those specific API calls is Pha
 (the agentic AI layer), not this one's; Phase 11 already noted "feasibility is deterministic,
 AI only ranks/explains later," and this phase is the proof that the deterministic side of that
 split actually works as one connected pipeline.
+
+## Reusable Rescheduling Engine (Phase 14)
+
+`InterviewReschedulingService` (in the `interview` package, since it manages `InterviewRound`
+state transitions the same way `InterviewProcessService` does, even though it calls into
+`scheduling` for the actual search) implements the two endpoints and is written to be a
+seam other phases plug into rather than duplicate:
+
+- **`POST /api/interviews/{id}/reschedule`** (self-or-staff, like Availability) — the reusable
+  flow: validate reschedulable state (`SCHEDULED` or already `RESCHEDULE_REQUIRED`) and the
+  `maximum_reschedules` cap, capture the round's *current* interviewer (as a soft preference,
+  not a hard requirement — the whole point of re-searching is that the original interviewer
+  might be exactly who's unavailable now) and any other already-assigned participants, cancel
+  the existing calendar event, null the round's `scheduledStart`/`scheduledEnd` and move it to
+  `RESCHEDULE_REQUIRED`, increment `reschedule_count`, notify + audit, then hand off to Phase
+  11/12's own `SchedulingService.recommend` — the *exact same* find → rank → recommend
+  pipeline a fresh scheduling request would use, not a parallel copy of it. Candidate stage
+  never changes here (unlike a PASS/FAIL result) — only the round's own schedule state moves,
+  which is what makes this one method reusable across every trigger the spec lists by name
+  (interviewer cancellation, a recruiter or candidate wanting a different time, a calendar
+  conflict/sync issue, a decline): none of them touch the pipeline stage, only the round.
+  Phase 15's interviewer-cancel and Phase 17's decline handling are expected to call this
+  same method rather than re-implement the flow.
+- **`POST /api/interviews/{id}/cancel`** (RECRUITER/ADMIN) — "recruiter intentional
+  cancellation" specifically (Phase 17's phrase for it): `CANCELLED`, calendar event cancelled,
+  participants marked `REMOVED` (not left `ASSIGNED` — a cancelled round shouldn't keep
+  counting against an interviewer's Phase 8 workload score, which reads exactly that status),
+  notify + audit. No automatic rescheduling — that's `reschedule`'s job, deliberately kept
+  separate per Phase 17's own distinction between the two.
+
+New: `reschedule_count` on `interview_rounds` (migration V19) — nothing before this phase
+needed to persist how many times a round had been moved, so there was nowhere to check
+`maximum_reschedules` against.
+
+**Verified live** against the real Supabase database with real HTTP requests: an unrelated
+candidate got `403` rescheduling someone else's round; the owning candidate successfully
+rescheduled their own `TECHNICAL` round and got back ranked slots with the original
+interviewer correctly preferred; direct SQL confirmed the old calendar event went `CANCELLED`,
+`scheduled_start`/`scheduled_end` went `null`, `timezone` was preserved as the search default,
+and both participants got an `INTERVIEW_RESCHEDULED` notification without losing their
+`ASSIGNED` status; re-booking the new slot correctly returned the round to `SCHEDULED`; cycling
+through reschedule → book two more times hit `reschedule_count = 3` (the configured
+`maximum_reschedules`) and a further attempt correctly returned `409`; omitting `dateFrom`
+correctly defaulted to searching from today. Separately, cancelling a different round
+correctly produced `CANCELLED`, a cancelled calendar event, both participants `REMOVED`, an
+`INTERVIEW_CANCELLED` notification/audit row, a `403` for a non-staff caller, and a `409` on a
+second cancel attempt. No bugs found this round.
 
 ## Deployment Preparation (later)
 

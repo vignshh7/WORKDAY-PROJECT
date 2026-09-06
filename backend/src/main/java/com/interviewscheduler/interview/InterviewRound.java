@@ -72,6 +72,9 @@ public class InterviewRound {
     @JoinColumn(name = "depends_on_round_id")
     private InterviewRound dependsOnRound;
 
+    @Column(name = "reschedule_count", nullable = false)
+    private Short rescheduleCount = 0;
+
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)
     private OffsetDateTime createdAt;

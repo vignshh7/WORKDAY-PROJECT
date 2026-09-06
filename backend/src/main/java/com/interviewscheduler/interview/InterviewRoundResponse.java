@@ -15,7 +15,8 @@ public record InterviewRoundResponse(
         OffsetDateTime scheduledStart,
         OffsetDateTime scheduledEnd,
         String timezone,
-        UUID dependsOnRoundId
+        UUID dependsOnRoundId,
+        Short rescheduleCount
 ) {
     public static InterviewRoundResponse from(InterviewRound round) {
         return new InterviewRoundResponse(
@@ -30,7 +31,8 @@ public record InterviewRoundResponse(
                 round.getScheduledStart(),
                 round.getScheduledEnd(),
                 round.getTimezone(),
-                round.getDependsOnRound() == null ? null : round.getDependsOnRound().getId()
+                round.getDependsOnRound() == null ? null : round.getDependsOnRound().getId(),
+                round.getRescheduleCount()
         );
     }
 }
