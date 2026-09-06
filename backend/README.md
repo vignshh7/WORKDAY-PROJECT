@@ -6,7 +6,7 @@ pipelines, availability, and deterministic interview scheduling. A future Agenti
 will orchestrate this backend through controlled service methods; it will never access the
 database directly.
 
-Status: **Phase 8 complete** (interviewer + skill matching). See [Implementation Phases](#implementation-phases).
+Status: **Phase 9 complete** (availability + working hours + timezones). See [Implementation Phases](#implementation-phases).
 
 > Phase numbering follows the project's master prompt (Phase 0–40), which supersedes an
 > earlier, coarser 17-phase draft. Phases 1 and 2 below were built under the old numbering
@@ -176,8 +176,8 @@ Once Swagger is wired (Phase 17): `http://localhost:8080/swagger-ui.html`
 | 6 | Users + candidates + jobs | ✅ Done |
 | 7 | Interview process + state machine | ✅ Done |
 | 8 | Interviewer + skill matching | ✅ Done |
-| 9 | Availability + working hours + timezones | ⏳ Next |
-| 10 | Conflict detection | Pending |
+| 9 | Availability + working hours + timezones | ✅ Done |
+| 10 | Conflict detection | ⏳ Next |
 | 11 | Slot finding + ranking | Pending |
 | 12 | Booking + concurrency + idempotency | Pending |
 | 13 | Normal recruiter scheduling (wiring) | Pending |
@@ -495,6 +495,48 @@ instance and no local Postgres/Docker in this environment, so this was verified 
 **Seed at least one interviewer profile with skills and run `/api/interviewers/match`
 against a real round before starting Phase 9**, the same way every prior phase was closed
 out with real requests.
+
+## Availability, Working Hours & Timezones (Phase 9)
+
+`AvailabilityService` implements the four generic endpoints
+(`POST/GET/{userId}/PUT/{id}/DELETE/{id}` under `/api/availability`). Every user manages only
+their **own** availability — `POST` always creates for the authenticated caller (there's no
+target-user field on `AvailabilityRequest`), and `PUT`/`DELETE` require the caller to own the
+record; RECRUITER/ADMIN can still read anyone's (`GET /{userId}`), since a recruiter arranging
+an interview needs to see it. This isn't just Candidate/Job's usual self-or-staff pattern
+narrowed — the spec explicitly calls out "candidate cannot change another candidate's
+availability" and never mentions a staff override for *writing* someone else's calendar, so
+none was added.
+
+**Two role-scoped read services** (`CandidateAvailabilityService`, `InterviewerAvailabilityService`)
+sit alongside the generic one, matching the spec's explicit naming even though Phase 9 doesn't
+wire either to its own endpoint — they translate a candidate/interviewer *profile* id to the
+underlying user id and exist as the seam Phase 11's slot finder calls ("get candidate
+availability" / "get interviewer availability") without knowing that mapping itself.
+
+**Validation, in two layers:**
+- *Structural* (Bean Validation, 400) — `@ValidAvailabilityWindow` (class-level, on
+  `AvailabilityRequest`) rejects `endTime <= startTime`; `@ValidTimezone` rejects any string
+  `ZoneId.of(...)` doesn't accept, catching typos/garbage before they reach a service or the DB.
+- *Business policy* (service layer, 409 `ConflictException`) — only for `AVAILABLE` entries
+  (marking yourself `UNAVAILABLE` is always accepted, since it only narrows the record, never
+  claims bookability): the window must fall inside `scheduling_config`'s `working_start`/
+  `working_end`, and a weekend window is rejected unless `allow_weekends` is set.
+  `WorkingHoursService` reads that single config row (seeded by V17) for both checks.
+- *Overlap* (service layer, 409) — a new/updated window is rejected if it overlaps **any**
+  existing entry for the same user, regardless of status. Comparison happens on UTC instants,
+  not raw date/time fields: `TimezoneService.toUtcRange` resolves each window through
+  `ZonedDateTime` (which is DST-aware — the same wall-clock time maps to a different UTC
+  instant depending on the date), and the overlap query scans the target date +-1 day so a
+  same-user pair recorded in different timezones is still compared correctly across a
+  day-boundary shift.
+
+**Verification:** same constraint as Phases 7-8 — no network route to the configured Supabase
+instance and no local Postgres/Docker in this environment, so this was verified with a clean
+`compile`/`test-compile`/`package` under JDK 21, not a live boot or real HTTP requests.
+**Exercise all four endpoints for real — including a same-timezone overlap, a cross-timezone
+overlap, a DST-transition date, a weekend attempt, and an outside-working-hours attempt —
+before starting Phase 10.**
 
 ## Deployment Preparation (later)
 
