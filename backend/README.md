@@ -6,7 +6,7 @@ pipelines, availability, and deterministic interview scheduling. A future Agenti
 will orchestrate this backend through controlled service methods; it will never access the
 database directly.
 
-Status: **Phase 6 complete** (users + candidates + jobs). See [Implementation Phases](#implementation-phases).
+Status: **Phase 7 complete** (interview process + state machine). See [Implementation Phases](#implementation-phases).
 
 > Phase numbering follows the project's master prompt (Phase 0–40), which supersedes an
 > earlier, coarser 17-phase draft. Phases 1 and 2 below were built under the old numbering
@@ -174,8 +174,8 @@ Once Swagger is wired (Phase 17): `http://localhost:8080/swagger-ui.html`
 | 4 | DTOs + validation + errors | ✅ Done |
 | 5 | Authentication + JWT + RBAC | ✅ Done |
 | 6 | Users + candidates + jobs | ✅ Done |
-| 7 | Interview process + state machine | ⏳ Next |
-| 8 | Interviewer + skill matching | Pending |
+| 7 | Interview process + state machine | ✅ Done |
+| 8 | Interviewer + skill matching | ⏳ Next |
 | 9 | Availability + working hours + timezones | Pending |
 | 10 | Conflict detection | Pending |
 | 11 | Slot finding + ranking | Pending |
@@ -393,6 +393,62 @@ This testing round caught three real bugs, fixed before moving on:
    response is built in the same transaction as the write — `Job`/`Candidate`/`User` creation
    all needed this for `createdAt`/`updatedAt` to come back non-null, same root cause as the
    `AuthService.register` bug.
+
+## Interview Process & Round State Machine (Phase 7)
+
+`InterviewProcessService` implements the three endpoints the spec lists plus the round
+completion/result actions its Phase 4 DTOs (`CompleteRoundRequest`, `RoundResultRequest`)
+were already shaped for:
+
+- `POST /api/interview-processes` (`InterviewProcessController`) — RECRUITER/ADMIN only.
+- `GET /api/interview-processes/{id}` — self-or-staff, same object-level pattern as Phase 6.
+- `GET /api/candidates/{id}/interview-process` (on `CandidateController`, since the path is
+  candidate-scoped) — the candidate's current ACTIVE process.
+- `POST /api/interviews/{id}/complete` / `POST /api/interviews/{id}/result`
+  (`InterviewController`) — "an interview" in these URLs is one `interview_rounds` row, the
+  thing that actually gets completed/resolved; Phases 12+ (booking, rescheduling,
+  cancellation) add more actions under this same `/api/interviews/{id}` base per the spec.
+
+**Creating a process** creates all four rounds (SCREENING, TECHNICAL, MANAGERIAL, HR;
+round *n* depends on round *n-1* via `depends_on_round_id`) and moves the candidate
+APPLIED -> SCREENING in the same transaction — this is the one place `CandidateStatus` and
+`RoundType` names are intentionally identical, so `toCandidateStatus(RoundType)` is a direct
+mapping. `InterviewProcessRepository.findByCandidateIdAndStatus` returns an `Optional`, not a
+`List` — that was Phase 3's way of encoding "one ACTIVE process per candidate at a time";
+Phase 7 enforces it explicitly (`DuplicateResourceException` on a second attempt) rather than
+letting a schema-level assumption go unchecked. Starting a process for a REJECTED/WITHDRAWN
+candidate is also refused.
+
+**Round status vs. round result** are deliberately separate actions:
+`/complete` moves `SCHEDULED`/`IN_PROGRESS` -> `COMPLETED` (the interview happened, no
+verdict yet) and refuses to complete anything other than the candidate's *current* round
+(prevents completing a future round out of order). `/result` then requires the round to
+already be `COMPLETED`, refuses a second result on the same round (`result` must still be
+`PENDING`) and refuses any result on a `CANCELLED` round — the three prevention rules the
+spec calls out by name. The result drives progression:
+
+- **PASS** — advance to `roundNumber + 1` if it exists (process `currentRound` and the
+  candidate's `currentStatus`/`currentRound` all move together); on the last round (HR) the
+  candidate becomes `SELECTED` and the process `COMPLETED` instead.
+- **FAIL** — candidate `REJECTED`, process `REJECTED`, and every later round that isn't
+  already `COMPLETED`/`CANCELLED` is set `CANCELLED` in the same transaction ("future rounds
+  invalidated").
+- **HOLD** — the round records `HOLD` and nothing else changes; no automatic retry/requeue
+  mechanism exists yet since the spec doesn't define one at this phase.
+
+Rounds don't yet have a way to reach `SCHEDULED` (that's Phase 12's booking flow) — until
+then `/complete` and `/result` are only reachable by moving a round's status directly in the
+database, which is expected at this point in the build.
+
+**Verification:** this phase was built and reviewed in an environment with no network route
+to the configured Supabase instance and no local Postgres/Docker available, so — unlike
+Phases 1-6 — it was **not** boot-tested against a real database or exercised with real HTTP
+requests. What was verified: `./mvnw clean compile`, `test-compile`, and `package` all succeed
+cleanly (JDK 21) with the new `InterviewProcessService`, `InterviewProcessController`,
+`InterviewController`, and the `CandidateController` addition, and the state-machine logic
+above was traced by hand against every prevention rule in the spec. **Run `./mvnw spring-boot:run`
+against a real database and exercise all five endpoints before starting Phase 8**, the same
+way every prior phase was closed out.
 
 ## Deployment Preparation (later)
 

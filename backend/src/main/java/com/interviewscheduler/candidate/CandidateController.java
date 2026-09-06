@@ -1,5 +1,7 @@
 package com.interviewscheduler.candidate;
 
+import com.interviewscheduler.interview.InterviewProcessResponse;
+import com.interviewscheduler.interview.InterviewProcessService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
@@ -22,6 +24,7 @@ import java.util.UUID;
 public class CandidateController {
 
     private final CandidateService candidateService;
+    private final InterviewProcessService interviewProcessService;
 
     @PostMapping
     @PreAuthorize("hasAnyRole('RECRUITER', 'ADMIN')")
@@ -63,5 +66,10 @@ public class CandidateController {
     @GetMapping("/{id}/status")
     public CandidateStatusResponse getStatus(@PathVariable UUID id) {
         return candidateService.getStatus(id);
+    }
+
+    @GetMapping("/{id}/interview-process")
+    public InterviewProcessResponse getInterviewProcess(@PathVariable UUID id) {
+        return interviewProcessService.findActiveByCandidate(id);
     }
 }
