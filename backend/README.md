@@ -6,7 +6,7 @@ pipelines, availability, and deterministic interview scheduling. A future Agenti
 will orchestrate this backend through controlled service methods; it will never access the
 database directly.
 
-Status: **Phase 12 complete** (booking + concurrency + idempotency). See [Implementation Phases](#implementation-phases).
+Status: **Phase 13 complete** (normal recruiter scheduling, wired end-to-end). See [Implementation Phases](#implementation-phases).
 
 > Phase numbering follows the project's master prompt (Phase 0–40), which supersedes an
 > earlier, coarser 17-phase draft. Phases 1 and 2 below were built under the old numbering
@@ -186,8 +186,8 @@ Once Swagger is wired (Phase 17): `http://localhost:8080/swagger-ui.html`
 | 10 | Conflict detection | ✅ Done |
 | 11 | Slot finding + ranking | ✅ Done |
 | 12 | Booking + concurrency + idempotency | ✅ Done |
-| 13 | Normal recruiter scheduling (wiring) | ⏳ Next |
-| 14 | Reusable rescheduling engine | Pending |
+| 13 | Normal recruiter scheduling (wiring) | ✅ Done |
+| 14 | Reusable rescheduling engine | ⏳ Next |
 | 15 | Interviewer cancellation | Pending |
 | 16 | Backup + replacement | Pending |
 | 17 | Participant decline + rescheduling | Pending |
@@ -742,6 +742,50 @@ same tables); a new idempotency key against the now-`SCHEDULED` round correctly 
 request at a time) — the locking strategy is code-reviewed and explained above, not exercised
 under real concurrency. Worth a genuine concurrent-client test before relying on it in
 production.
+
+## Normal Recruiter Scheduling (Phase 13)
+
+Unlike every phase before it, Phase 13 adds **no new code** — the spec itself frames it as
+"connect all scheduling components," with no `Implement:` endpoint list of its own, just a
+flow and a worked example. Every step of that flow already existed by the end of Phase 12
+(identify candidate/job/current round -> Phase 7; requirements/eligible interviewer -> Phase
+8; availability -> Phase 9; conflicts/working hours -> Phase 10; slots/ranking/recommendation
+-> Phase 11; fresh validation/booking/calendar/notifications/audit -> Phase 12) and "recruiter
+confirmation" is just the human step between calling `/recommend` and calling `/book` — not a
+third endpoint. So this phase's actual deliverable is proof that the wiring holds end-to-end,
+not new code.
+
+**Verified live** against the real Supabase database by replaying the spec's own example
+almost exactly — *"Schedule \[a candidate\]'s Java technical interview next week for 60
+minutes, prefer afternoon, exclude Friday, and ensure \[an interviewer\] is available"* —
+through nothing but the deterministic API, using a fresh candidate/job/process to avoid any
+interference from earlier phases' test data:
+
+1. Registered a new candidate, gave them a `Java` skill, created a job requiring it, started
+   an interview process (4 fresh `PENDING` rounds).
+2. Booked and passed the `SCREENING` round first (exercising Phase 7's result/progression
+   logic for real, not just in isolation) — confirmed the candidate's `currentStatus` advanced
+   to `TECHNICAL` and `currentRoundId` moved to the technical round, which is what makes that
+   round schedulable at all (Phase 11/12's `SchedulabilityGuard` checks exactly this
+   dependency).
+3. Set the candidate's and interviewer's availability for a weekday next week *and* for the
+   Friday of that same week (deliberately, to prove exclusion actually filters something out
+   rather than trivially having nothing to exclude).
+4. Called `/recommend` with `preferredInterviewerId` (the interviewer), `durationMinutes: 60`,
+   `preferredTimeStart/End` covering the afternoon, and `excludedDays: ["FRIDAY"]` — got back
+   three ranked Monday-afternoon slots, the Friday availability correctly absent, and a
+   genuinely explainable `reason` on the top slot: *"Skill/domain match score 10.0; preferred
+   interviewer; within preferred time window; 7.9 day(s) out."*
+5. "Recruiter confirmation": booked the top-ranked slot exactly as returned, with no
+   modification — `200`, `SCHEDULED`, a calendar event id, matching Phase 12's already-verified
+   side effects.
+
+Every step returned exactly what the spec's worked example describes, using only IDs a
+recruiter's UI would already have on hand (candidate id, round id, interviewer id) — turning
+the literal English sentence in the example into those specific API calls is Phase 26's job
+(the agentic AI layer), not this one's; Phase 11 already noted "feasibility is deterministic,
+AI only ranks/explains later," and this phase is the proof that the deterministic side of that
+split actually works as one connected pipeline.
 
 ## Deployment Preparation (later)
 
