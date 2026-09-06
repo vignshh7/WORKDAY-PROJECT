@@ -7,18 +7,11 @@ import com.interviewscheduler.availability.TimezoneService;
 import com.interviewscheduler.availability.WorkingHoursService;
 import com.interviewscheduler.candidate.Candidate;
 import com.interviewscheduler.candidate.CandidateRepository;
-import com.interviewscheduler.candidate.CandidateStatus;
-import com.interviewscheduler.common.exception.ConflictException;
 import com.interviewscheduler.common.exception.ResourceNotFoundException;
 import com.interviewscheduler.interview.InterviewRound;
 import com.interviewscheduler.interview.InterviewRoundRepository;
-import com.interviewscheduler.interview.ParticipantRole;
-import com.interviewscheduler.interview.RoundResult;
-import com.interviewscheduler.interview.RoundStatus;
 import com.interviewscheduler.interviewer.InterviewerMatchResult;
 import com.interviewscheduler.interviewer.InterviewerMatchingService;
-import com.interviewscheduler.user.User;
-import com.interviewscheduler.user.UserRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -50,12 +43,13 @@ public class SlotFinderService {
 
     private final CandidateRepository candidateRepository;
     private final InterviewRoundRepository interviewRoundRepository;
-    private final UserRepository userRepository;
     private final AvailabilityRepository availabilityRepository;
     private final InterviewerMatchingService interviewerMatchingService;
     private final ConflictDetectionService conflictDetectionService;
     private final WorkingHoursService workingHoursService;
     private final TimezoneService timezoneService;
+    private final SchedulabilityGuard schedulabilityGuard;
+    private final ParticipantRoleResolver participantRoleResolver;
 
     @Transactional(readOnly = true)
     public SchedulingResponse findSlots(SchedulingRequest request) {
@@ -67,7 +61,7 @@ public class SlotFinderService {
             throw new ResourceNotFoundException(
                     "Round " + round.getId() + " does not belong to candidate " + candidate.getId());
         }
-        validateSchedulable(candidate, round);
+        schedulabilityGuard.validate(candidate, round);
 
         List<InterviewerMatchResult> eligibleInterviewers =
                 interviewerMatchingService.match(round.getId()).eligibleInterviewers();
@@ -84,7 +78,7 @@ public class SlotFinderService {
         List<UUID> requiredParticipantIds = request.requiredParticipantIds() == null
                 ? List.of() : request.requiredParticipantIds();
         List<CheckConflictsRequest.RequiredParticipant> requiredParticipants = requiredParticipantIds.stream()
-                .map(this::resolveParticipant)
+                .map(participantRoleResolver::resolve)
                 .toList();
 
         List<TimezoneService.TimeRange> baseCommon = candidateWindows;
@@ -170,22 +164,6 @@ public class SlotFinderService {
         return SchedulingResponse.of(sorted, List.of());
     }
 
-    private void validateSchedulable(Candidate candidate, InterviewRound round) {
-        if (candidate.getCurrentStatus() == CandidateStatus.REJECTED
-                || candidate.getCurrentStatus() == CandidateStatus.WITHDRAWN) {
-            throw new ConflictException("Cannot schedule an interview for a rejected or withdrawn candidate");
-        }
-        if (round.getStatus() != RoundStatus.PENDING && round.getStatus() != RoundStatus.RESCHEDULE_REQUIRED) {
-            throw new ConflictException("Round is not in a schedulable state: " + round.getStatus());
-        }
-        InterviewRound dependsOn = round.getDependsOnRound();
-        if (dependsOn != null
-                && !(dependsOn.getStatus() == RoundStatus.COMPLETED && dependsOn.getResult() == RoundResult.PASS)) {
-            throw new ConflictException("Round " + round.getRoundNumber() + " depends on round "
-                    + dependsOn.getRoundNumber() + ", which has not been completed with a PASS result");
-        }
-    }
-
     private boolean passesDateTimeFilters(SchedulingRequest request, SchedulingConfig config, Instant start,
                                            ZonedDateTime startLocal, ZonedDateTime endLocal) {
         Instant noticeLimit = Instant.now().plus(config.getMinimumBookingNoticeMinutes(), ChronoUnit.MINUTES);
@@ -258,21 +236,5 @@ public class SlotFinderService {
             }
         }
         return result;
-    }
-
-    /**
-     * No User.Role maps to ParticipantRole.HIRING_MANAGER (the schema has no such user role) -
-     * a required participant is classified as RECRUITER unless their account role is literally
-     * CANDIDATE or INTERVIEWER.
-     */
-    private CheckConflictsRequest.RequiredParticipant resolveParticipant(UUID userId) {
-        User user = userRepository.findById(userId)
-                .orElseThrow(() -> new ResourceNotFoundException("No user with id: " + userId));
-        ParticipantRole role = switch (user.getRole()) {
-            case CANDIDATE -> ParticipantRole.CANDIDATE;
-            case INTERVIEWER -> ParticipantRole.INTERVIEWER;
-            case RECRUITER, ADMIN -> ParticipantRole.RECRUITER;
-        };
-        return new CheckConflictsRequest.RequiredParticipant(userId, role);
     }
 }

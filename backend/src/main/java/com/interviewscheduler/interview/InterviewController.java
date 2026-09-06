@@ -1,5 +1,8 @@
 package com.interviewscheduler.interview;
 
+import com.interviewscheduler.scheduling.BookingRequest;
+import com.interviewscheduler.scheduling.BookingResponse;
+import com.interviewscheduler.scheduling.InterviewBookingService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -13,8 +16,8 @@ import java.util.UUID;
 
 /**
  * "An interview" here means a single interview round (interview_rounds row) — the entity
- * that gets scheduled, completed and resolved. Phases 12+ (booking, rescheduling,
- * cancellation) add more actions under this same /api/interviews/{id} base.
+ * that gets scheduled, completed and resolved. Phases 14+ (rescheduling, cancellation) add
+ * more actions under this same /api/interviews/{id} base.
  */
 @RestController
 @RequestMapping("/api/interviews")
@@ -22,6 +25,13 @@ import java.util.UUID;
 public class InterviewController {
 
     private final InterviewProcessService interviewProcessService;
+    private final InterviewBookingService interviewBookingService;
+
+    @PostMapping("/{id}/book")
+    @PreAuthorize("hasAnyRole('RECRUITER', 'ADMIN')")
+    public BookingResponse book(@PathVariable UUID id, @Valid @RequestBody BookingRequest request) {
+        return interviewBookingService.book(id, request);
+    }
 
     @PostMapping("/{id}/complete")
     @PreAuthorize("hasAnyRole('RECRUITER', 'ADMIN')")

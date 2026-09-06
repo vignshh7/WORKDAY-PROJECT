@@ -6,7 +6,7 @@ pipelines, availability, and deterministic interview scheduling. A future Agenti
 will orchestrate this backend through controlled service methods; it will never access the
 database directly.
 
-Status: **Phase 11 complete** (slot finding + ranking). See [Implementation Phases](#implementation-phases).
+Status: **Phase 12 complete** (booking + concurrency + idempotency). See [Implementation Phases](#implementation-phases).
 
 > Phase numbering follows the project's master prompt (Phase 0–40), which supersedes an
 > earlier, coarser 17-phase draft. Phases 1 and 2 below were built under the old numbering
@@ -185,8 +185,8 @@ Once Swagger is wired (Phase 17): `http://localhost:8080/swagger-ui.html`
 | 9 | Availability + working hours + timezones | ✅ Done |
 | 10 | Conflict detection | ✅ Done |
 | 11 | Slot finding + ranking | ✅ Done |
-| 12 | Booking + concurrency + idempotency | ⏳ Next |
-| 13 | Normal recruiter scheduling (wiring) | Pending |
+| 12 | Booking + concurrency + idempotency | ✅ Done |
+| 13 | Normal recruiter scheduling (wiring) | ⏳ Next |
 | 14 | Reusable rescheduling engine | Pending |
 | 15 | Interviewer cancellation | Pending |
 | 16 | Backup + replacement | Pending |
@@ -671,6 +671,77 @@ returned 409 before reaching the dependency check; a date range with no candidat
 correctly returned `NO_CANDIDATE_AVAILABILITY`; `/rank-slots` correctly applied the preferred-
 interviewer bonus and re-sorted; a non-RECRUITER/ADMIN caller got 403 on all three endpoints.
 No bugs found this round — everything behaved as designed on the first live pass.
+
+## Booking + Concurrency + Idempotency (Phase 12)
+
+`InterviewBookingService.book` (`POST /api/interviews/{id}/book`, RECRUITER/ADMIN) is the
+spec's flow almost line for line: idempotency check -> validate round/candidate/interviewer ->
+validate participants/dependency -> fresh availability -> fresh conflict check -> concurrency
+locks -> upsert participants -> `SCHEDULED` -> calendar record -> notifications -> audit ->
+commit (one `@Transactional` method; "commit" is just letting it return normally). Two
+existing exceptions finally get the job they were written for back in Phase 4: `InvalidBooking
+Exception` for a structurally bad request (`end <= start`), `SchedulingException` for a
+deterministic-engine failure at booking time (a fresh conflict check failing) — its
+`reasonCode` reuses `ALL_SLOTS_CONFLICTED` from Phase 11's enum rather than inventing a new one,
+since it's the same situation, just discovered later.
+
+**PostgreSQL transaction/locking strategy** (the spec asks for this explicitly, so it's
+documented at length in the service's own class-level javadoc too): the whole booking is one
+transaction at Postgres's default READ COMMITTED isolation — no isolation level change needed,
+because correctness here comes from two explicit `SELECT ... FOR UPDATE` row locks, not from
+snapshot isolation:
+- `InterviewRoundRepository.findByIdForUpdate` — a second transaction targeting the *same
+  round* (a double-click, two recruiters racing on one round) blocks here until the first
+  commits or rolls back, then reads the round's now-current status and correctly refuses to
+  double-book it — no special "already booked" detection needed, the ordinary schedulability
+  check does it once the lock releases.
+- `InterviewerProfileRepository.findByIdForUpdate` — a second transaction targeting the *same
+  interviewer* on a *different* round (which the round lock alone wouldn't catch) also blocks
+  here, then its fresh conflict check correctly sees the first transaction's now-committed
+  participant/round rows.
+
+Documented honestly, not glossed over: this doesn't lock the candidate or other required
+participants the same way. A true concurrent double-booking race on a shared *candidate*
+across two different rounds isn't fully serialized by a row lock here — mitigated by Phase 7's
+invariant that a candidate has only one ACTIVE process at a time, which narrows the realistic
+window for this considerably, but it's not the same hard guarantee the interviewer gets.
+
+**Idempotency** is a separate mechanism layered on top, not a byproduct of the locks:
+`common.idempotency.IdempotencyService` + a new `idempotency_keys` table (migration V18,
+`UNIQUE (scope, key_value)`) generic enough for any later phase to reuse under its own scope
+string. `claim(scope, key)` is called first, inside the same transaction that will perform the
+operation: if `(scope, key)` already completed, it deserializes and returns the *original*
+response immediately, re-running nothing; if it's found but not yet completed, or if inserting
+a new claim row hits the unique constraint, that's a duplicate in flight → `409`. Because the
+claim is part of the same transaction as the booking, a request that fails after claiming (bad
+input, stale availability, a lost conflict-check race) rolls the claim back too — only a
+transaction that reaches `complete()` permanently remembers the key, so a genuinely failed
+attempt can still be retried with the same key. The unique constraint is what actually makes
+concurrent duplicates safe: a second transaction's insert of the same key blocks on Postgres's
+MVCC until the first commits or rolls back, then either fails cleanly (first one succeeded) or
+proceeds (first one didn't) — never both succeeding.
+
+Two small shared components came out of this phase's overlap with Phase 11's own validation
+needs, extracted rather than copy-pasted a second time: `SchedulabilityGuard` (candidate/round
+schedulability - originally a private method inside `SlotFinderService`, now used by both
+find-slots and booking, since a slot search and the eventual booking attempt can be minutes or
+days apart and both need the same check re-run) and `ParticipantRoleResolver` (the same
+`User.Role` → `ParticipantRole` mapping, including the `HIRING_MANAGER` gap noted in Phase 11).
+
+**Verified live** against the real Supabase database with real HTTP requests: a non-staff
+caller got `403`; a valid booking returned `200` with `SCHEDULED`/scheduled times/a calendar
+event id, and direct SQL confirmed every side effect actually landed — `interview_rounds`
+updated, two `interview_participants` rows (`CANDIDATE`+`INTERVIEWER`, both `ASSIGNED`), one
+`calendar_events` row (`PENDING`), two `notifications` rows (`INTERVIEW_SCHEDULED`, `PENDING`),
+one `audit_logs` row with the right metadata, and exactly one `idempotency_keys` row
+(`COMPLETED`); retrying the identical request with the same idempotency key returned a
+byte-identical response and created **no** additional rows anywhere (confirmed against the
+same tables); a new idempotency key against the now-`SCHEDULED` round correctly got `409`
+("not in a schedulable state") instead of double-booking; an inverted time range got `422`.
+**Not verified**: true concurrent request races (this session drives the API sequentially, one
+request at a time) — the locking strategy is code-reviewed and explained above, not exercised
+under real concurrency. Worth a genuine concurrent-client test before relying on it in
+production.
 
 ## Deployment Preparation (later)
 

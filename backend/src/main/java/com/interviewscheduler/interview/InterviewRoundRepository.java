@@ -1,6 +1,8 @@
 package com.interviewscheduler.interview;
 
+import jakarta.persistence.LockModeType;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
@@ -10,6 +12,15 @@ import java.util.Optional;
 import java.util.UUID;
 
 public interface InterviewRoundRepository extends JpaRepository<InterviewRound, UUID> {
+
+    /**
+     * {@code SELECT ... FOR UPDATE} - serializes concurrent booking/reschedule/cancel attempts
+     * on the same round. The second transaction blocks here until the first commits or rolls
+     * back, then sees the now-current status instead of racing against it.
+     */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select r from InterviewRound r where r.id = :id")
+    Optional<InterviewRound> findByIdForUpdate(@Param("id") UUID id);
 
     List<InterviewRound> findByProcessIdOrderByRoundNumberAsc(UUID processId);
 
