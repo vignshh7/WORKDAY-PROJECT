@@ -1,0 +1,11 @@
+package com.interviewscheduler.interview;
+
+import org.springframework.data.jpa.repository.JpaRepository;
+
+import java.util.List;
+import java.util.UUID;
+
+public interface RoundRequirementRepository extends JpaRepository<RoundRequirement, UUID> {
+
+    List<RoundRequirement> findByRoundId(UUID roundId);
+}

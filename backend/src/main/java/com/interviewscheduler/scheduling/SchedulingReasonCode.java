@@ -1,0 +1,11 @@
+package com.interviewscheduler.scheduling;
+
+public enum SchedulingReasonCode {
+    NO_CANDIDATE_AVAILABILITY,
+    NO_INTERVIEWER_AVAILABILITY,
+    NO_COMMON_SLOT,
+    NO_QUALIFIED_INTERVIEWER,
+    ALL_SLOTS_CONFLICTED,
+    OUTSIDE_WORKING_HOURS,
+    DATE_RANGE_EXHAUSTED
+}

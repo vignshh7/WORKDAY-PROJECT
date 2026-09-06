@@ -1,0 +1,10 @@
+# Backend has its own .gitignore for build artifacts (target/, .env, IDE files).
+# This root file covers anything outside backend/ (e.g. a future frontend/).
+
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+node_modules/
+.env
+.env.local

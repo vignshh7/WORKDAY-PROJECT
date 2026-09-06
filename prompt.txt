@@ -1,0 +1,1404 @@
+MASTER CLAUDE PROMPT
+AGENTIC AI SMART INTERVIEW SCHEDULING PLATFORM
+PHASE-WISE COMPLETE IMPLEMENTATION PLAN
+
+HOW TO USE
+Give Claude ONE PHASE at a time. After each phase:
+1. Run the application.
+2. Test it.
+3. Fix all errors.
+4. Commit the working code.
+5. Then provide the next phase prompt.
+
+CORE ARCHITECTURE
+React + TypeScript
+        |
+        v
+Spring Boot REST API
+        |
+        +----------------------+
+        |                      |
+        v                      v
+Agentic AI             Deterministic Services
+        |                      |
+        +----------+-----------+
+                   |
+                   v
+             Supabase PostgreSQL
+                   |
+        +----------+----------+
+        |          |          |
+        v          v          v
+ Google Calendar Google Meet Email
+
+CORE PRINCIPLES
+- Supabase PostgreSQL is the source of truth.
+- Spring Boot enforces authentication, authorization, business rules,
+  scheduling constraints, transactions and state transitions.
+- Agentic AI interprets natural language, orchestrates tools, ranks valid
+  options and explains decisions.
+- AI must NEVER directly access SQL/PostgreSQL.
+- AI must NEVER invent availability, interviewer skills or booking success.
+- Frontend is not the source of truth.
+- Use Java 21, Spring Boot 3.x, Maven, Spring Web, JPA/Hibernate,
+  Spring Security/JWT, BCrypt, Validation, PostgreSQL, Flyway, Lombok,
+  Actuator and OpenAPI/Swagger.
+- Use a modular monolith. Do not introduce microservices, Kafka, Redis,
+  Kubernetes or a Python agent server.
+- Use constructor injection, DTOs, services and repositories.
+- Use spring.jpa.hibernate.ddl-auto=validate. Flyway is the schema source of truth.
+- Never hardcode secrets.
+
+============================================================
+PHASE 0 — REQUIREMENTS + ARCHITECTURE BASELINE
+============================================================
+GOAL:
+Freeze the domain and architecture before implementation.
+
+CLAUDE PROMPT:
+Produce:
+1. Final architecture.
+2. Package/module structure.
+3. Complete domain model.
+4. Entity relationship diagram in ASCII.
+5. Candidate and interview-round state machines.
+6. API roadmap.
+7. Integration roadmap.
+8. Security/RBAC model.
+9. Scheduling algorithm.
+10. Failure/retry strategy.
+11. Agentic AI tool architecture.
+12. Frontend roadmap.
+
+Mandatory scenarios:
+- recruiter scheduling
+- natural-language scheduling
+- candidate/job/round identification
+- skill matching
+- candidate/interviewer/recruiter/hiring-manager availability
+- working hours
+- time zones
+- duration and buffer
+- calendar conflicts
+- double booking
+- interviewer cancellation
+- interviewer decline
+- backup/replacement interviewer
+- candidate reschedule
+- recruiter reschedule
+- no qualified interviewer
+- no common slot
+- calendar failure
+- notification failure
+- candidate rejection before future rounds
+- maximum reschedules
+- concurrent booking
+- idempotent booking
+
+Do not code yet.
+
+============================================================
+PHASE 1 — SPRING BOOT FOUNDATION
+============================================================
+Create the Java 21 Spring Boot 3.x Maven backend.
+
+Dependencies:
+Spring Web
+Spring Data JPA
+PostgreSQL Driver
+Flyway
+Spring Security
+Validation
+Lombok
+Actuator
+OpenAPI/Swagger
+
+Package:
+com.interviewscheduler
+  config
+  security
+  auth
+  user
+  candidate
+  job
+  interview
+  interviewer
+  availability
+  scheduling
+  notification
+  audit
+  admin
+  integration
+  common
+
+Create:
+pom.xml
+application.yml
+.gitignore
+main application class
+health endpoint
+environment configuration
+
+Configure:
+server.port=${PORT:8080}
+PostgreSQL
+Flyway
+JPA validate
+Actuator
+
+Do not implement AI, Google Calendar or frontend.
+
+============================================================
+PHASE 2 — SUPABASE POSTGRESQL + FLYWAY
+============================================================
+Use Supabase PostgreSQL.
+
+Create migrations:
+V1__create_users.sql
+V2__create_skills.sql
+V3__create_candidates.sql
+V4__create_candidate_skills.sql
+V5__create_jobs.sql
+V6__create_job_skills.sql
+V7__create_interview_processes.sql
+V8__create_interview_rounds.sql
+V9__create_interviewer_profiles.sql
+V10__create_interviewer_skills.sql
+V11__create_round_requirements.sql
+V12__create_interview_participants.sql
+V13__create_availability.sql
+V14__create_calendar_events.sql
+V15__create_notifications.sql
+V16__create_audit_logs.sql
+V17__create_scheduling_config.sql
+
+Schema:
+
+users:
+id UUID, name, email UNIQUE, password_hash, role, status, timezone,
+created_at, updated_at
+
+roles:
+ADMIN, RECRUITER, INTERVIEWER, CANDIDATE
+
+user status:
+ACTIVE, INACTIVE, SUSPENDED
+
+candidates:
+id, user_id UNIQUE, phone, resume_url, current_status,
+current_round_id nullable, created_at, updated_at
+
+candidate status:
+APPLIED, SCREENING, TECHNICAL, MANAGERIAL, HR, SELECTED,
+REJECTED, WITHDRAWN, ON_HOLD
+
+skills:
+id, name UNIQUE, domain
+
+candidate_skills:
+id, candidate_id, skill_id, proficiency, years_experience
+UNIQUE(candidate_id, skill_id)
+
+jobs:
+id, title, description, department, domain, status, created_by,
+created_at, updated_at
+
+job status:
+DRAFT, OPEN, CLOSED, ON_HOLD
+
+job_skills:
+id, job_id, skill_id, required, weight, minimum_proficiency
+UNIQUE(job_id, skill_id)
+
+interview_processes:
+id, candidate_id, job_id, status, current_round,
+created_at, updated_at
+
+process status:
+ACTIVE, COMPLETED, REJECTED, CANCELLED
+
+interview_rounds:
+id, process_id, round_number, round_type, status, result,
+duration_minutes, buffer_minutes, scheduled_start, scheduled_end,
+timezone, depends_on_round_id, created_at, updated_at
+
+round types:
+SCREENING, TECHNICAL, MANAGERIAL, HR
+
+round status:
+PENDING, SCHEDULING, SCHEDULED, IN_PROGRESS, COMPLETED,
+RESCHEDULE_REQUIRED, CANCELLED
+
+result:
+PENDING, PASS, FAIL, HOLD
+
+round_requirements:
+id, round_id, skill_id, minimum_proficiency, required
+UNIQUE(round_id, skill_id)
+
+interviewer_profiles:
+id, user_id UNIQUE, department, designation, domain, max_interviews_per_day
+
+interviewer_skills:
+id, interviewer_id, skill_id, proficiency, years_experience, is_primary
+UNIQUE(interviewer_id, skill_id)
+
+interview_participants:
+id, interview_round_id, user_id, participant_role,
+assignment_type, status
+
+participant role:
+CANDIDATE, INTERVIEWER, RECRUITER, HIRING_MANAGER
+
+assignment:
+PRIMARY, BACKUP, REPLACEMENT
+
+participant status:
+ASSIGNED, CONFIRMED, DECLINED, REMOVED
+
+availability:
+id, user_id, date, start_time, end_time, status, timezone
+status: AVAILABLE, UNAVAILABLE
+
+calendar_events:
+id, interview_round_id, provider, external_event_id,
+meeting_link, start_time, end_time, status
+status: CREATED, UPDATED, CANCELLED, FAILED, PENDING
+
+notifications:
+id, user_id, interview_round_id, type, channel, status, sent_at, created_at
+channel: EMAIL, SMS, IN_APP
+status: PENDING, SENT, FAILED
+
+audit_logs:
+id, actor_id, actor_type, action, entity_type, entity_id,
+metadata JSONB, created_at
+
+scheduling_config:
+id, working_start, working_end, default_buffer_minutes,
+minimum_booking_notice_minutes, maximum_scheduling_days,
+allow_weekends, maximum_reschedules,
+interviewer_replacement_policy, updated_at
+
+Add proper foreign keys, unique constraints, indexes and useful CHECK constraints.
+Use dependency-safe migration order.
+
+============================================================
+PHASE 3 — JPA ENTITIES + ENUMS + REPOSITORIES
+============================================================
+Create all entities matching the SQL exactly:
+User, Skill, Candidate, CandidateSkill, Job, JobSkill,
+InterviewProcess, InterviewRound, RoundRequirement,
+InterviewerProfile, InterviewerSkill, InterviewParticipant,
+Availability, CalendarEvent, Notification, AuditLog, SchedulingConfig.
+
+Use JPA annotations and STRING enums.
+Avoid dangerous bidirectional JSON serialization.
+
+Repositories must support:
+- user by email
+- candidate by id/user
+- job by status
+- active process
+- rounds by process
+- current round
+- round requirements
+- interviewers and skills
+- availability by user/date range
+- participants
+- calendar events
+- scheduled events for conflict checks
+- notifications
+- audit logs
+
+Do not put business rules in repositories.
+
+============================================================
+PHASE 4 — DTOs + VALIDATION + ERRORS
+============================================================
+Create DTOs:
+RegisterRequest, LoginRequest, LoginResponse
+UserResponse, UpdateUserRequest
+CreateCandidateRequest, UpdateCandidateRequest, CandidateResponse
+CandidateSkillRequest/Response
+CreateJobRequest, UpdateJobRequest, JobResponse, JobSkillRequest
+CreateInterviewProcessRequest, InterviewProcessResponse
+InterviewRoundResponse, RoundResultRequest, CompleteRoundRequest
+RescheduleRequest
+InterviewerResponse, InterviewerSkillRequest
+AvailabilityRequest/Response
+SchedulingRequest, SchedulingResponse, SlotResponse, ConflictResponse
+ReplacementResponse, BookingRequest, BookingResponse
+NotificationResponse, AuditLogResponse
+
+Use Bean Validation.
+
+Create @RestControllerAdvice and exceptions:
+ResourceNotFoundException
+DuplicateResourceException
+InvalidStateTransitionException
+ConflictException
+ForbiddenException
+UnauthorizedException
+InvalidBookingException
+SchedulingException
+CalendarIntegrationException
+NotificationException
+
+Return consistent JSON error responses.
+
+============================================================
+PHASE 5 — AUTHENTICATION + JWT + RBAC
+============================================================
+Implement:
+JwtService
+JwtAuthenticationFilter
+CustomUserDetailsService
+SecurityConfig
+AuthController
+AuthService
+
+APIs:
+POST /api/auth/register
+POST /api/auth/login
+
+Use BCrypt and JWT claims:
+userId, email, role
+
+Protect all non-auth APIs.
+
+RBAC:
+ADMIN — system administration/analytics
+RECRUITER — candidates/jobs/interviews/scheduling
+INTERVIEWER — own availability, assigned interviews, cancellation, permitted results
+CANDIDATE — own profile, availability, interviews, permitted rescheduling
+
+Implement object-level authorization.
+Examples:
+candidate cannot access another candidate;
+interviewer cannot cancel another interviewer's interview;
+candidate cannot change another candidate's availability.
+
+Test authentication, authorization and denial cases.
+
+============================================================
+PHASE 6 — USERS + CANDIDATES + JOBS
+============================================================
+Implement:
+
+Users:
+GET /api/users
+GET /api/users/{id}
+PUT /api/users/{id}
+PATCH /api/users/{id}/status
+
+Candidates:
+POST /api/candidates
+GET /api/candidates
+GET /api/candidates/{id}
+PUT /api/candidates/{id}
+GET /api/candidates/{id}/skills
+POST /api/candidates/{id}/skills
+GET /api/candidates/{id}/pipeline
+GET /api/candidates/{id}/status
+
+Jobs:
+POST /api/jobs
+GET /api/jobs
+GET /api/jobs/{id}
+PUT /api/jobs/{id}
+DELETE /api/jobs/{id}
+POST /api/jobs/{id}/skills
+GET /api/jobs/{id}/skills
+
+Add validation, authorization, duplicate prevention and audit logs.
+
+============================================================
+PHASE 7 — INTERVIEW PROCESS + STATE MACHINE
+============================================================
+Implement:
+POST /api/interview-processes
+GET /api/interview-processes/{id}
+GET /api/candidates/{candidateId}/interview-process
+
+Create default rounds:
+SCREENING
+TECHNICAL
+MANAGERIAL
+HR
+
+Strict candidate flow:
+APPLIED -> SCREENING -> TECHNICAL -> MANAGERIAL -> HR -> SELECTED
+FAIL -> REJECTED
+HOLD -> same stage
+
+Round flow:
+PENDING -> SCHEDULING -> SCHEDULED -> IN_PROGRESS -> COMPLETED
+SCHEDULED -> RESCHEDULE_REQUIRED -> SCHEDULED
+SCHEDULED -> CANCELLED
+
+Result:
+PASS -> next stage
+FAIL -> REJECTED + future rounds invalidated
+HOLD -> no progression
+
+Prevent:
+- invalid jumps
+- duplicate results
+- result on cancelled round
+- completing future round
+- scheduling dependent future round too early
+- scheduling withdrawn/rejected candidates
+
+All state changes transactional.
+
+============================================================
+PHASE 8 — INTERVIEWER + SKILL MATCHING
+============================================================
+Implement:
+GET /api/interviewers
+GET /api/interviewers/{id}
+GET /api/interviewers/{id}/skills
+POST /api/interviewers/{id}/skills
+POST /api/interviewers/match
+
+Services:
+InterviewerService
+InterviewerMatchingService
+
+Matching order:
+JOB REQUIREMENTS
+-> ROUND REQUIREMENTS
+-> HARD SKILL ELIGIBILITY
+-> DOMAIN
+-> ACTIVE STATUS
+-> WORKLOAD
+
+Hard eligibility:
+required skill exists;
+proficiency >= minimum;
+interviewer active;
+interviewer allowed for round.
+
+Soft ranking can consider:
+primary skills, stronger proficiency, domain, workload, utilization.
+
+Return eligible and failed reasons.
+
+============================================================
+PHASE 9 — AVAILABILITY + WORKING HOURS + TIMEZONES
+============================================================
+Implement:
+POST /api/availability
+GET /api/availability/{userId}
+PUT /api/availability/{id}
+DELETE /api/availability/{id}
+
+Services:
+CandidateAvailabilityService
+InterviewerAvailabilityService
+WorkingHoursService
+TimezoneService
+
+Support:
+- availability/unavailability
+- user timezone
+- system working hours
+- weekends
+- DST-aware zones
+
+Validate start < end, valid dates/zones, duplicate/overlapping policy.
+
+Test same/different timezones, DST, weekends, outside working hours,
+invalid ranges and no availability.
+
+============================================================
+PHASE 10 — CONFLICT DETECTION
+============================================================
+Implement:
+POST /api/scheduling/check-conflicts
+
+Service:
+ConflictDetectionService
+
+Conflict types:
+CANDIDATE_CONFLICT
+INTERVIEWER_CONFLICT
+RECRUITER_CONFLICT
+HIRING_MANAGER_CONFLICT
+CALENDAR_CONFLICT
+WORKING_HOURS_CONFLICT
+BUFFER_CONFLICT
+NOTICE_PERIOD_CONFLICT
+INVALID_TIME_RANGE
+ROUND_DEPENDENCY_CONFLICT
+
+Required participants may include:
+candidate, recruiter, hiring manager, interviewer.
+
+Use interval overlap plus buffer rules.
+
+Always perform a fresh conflict check immediately before booking.
+
+Test exact overlap, partial overlap, contained overlap, adjacent meetings,
+buffer violations, no conflict and timezone conversion.
+
+============================================================
+PHASE 11 — SLOT FINDING + RANKING
+============================================================
+Implement:
+POST /api/scheduling/find-slots
+POST /api/scheduling/rank-slots
+POST /api/scheduling/recommend
+
+Services:
+SlotFinderService
+SlotRankingService
+SchedulingService
+
+Input:
+candidateId
+roundId
+preferredInterviewerId optional
+durationMinutes
+dateFrom/dateTo
+preferredTimeStart/preferredTimeEnd optional
+excludedDays optional
+requiredParticipantIds
+timezone
+
+Algorithm:
+1. Validate candidate/round.
+2. Validate schedulability.
+3. Get round requirements.
+4. Find eligible interviewers.
+5. Prefer specified interviewer if eligible.
+6. Get candidate availability.
+7. Get required participant availability.
+8. Get interviewer availability.
+9. Get existing calendar events.
+10. Apply working hours.
+11. Normalize timezones.
+12. Apply duration.
+13. Apply buffer.
+14. Apply minimum notice.
+15. Apply maximum horizon.
+16. Exclude weekends/days.
+17. Check conflicts.
+18. Generate valid slots.
+19. Rank valid slots.
+20. Return alternatives.
+
+Feasibility is deterministic. AI only ranks/explains later.
+
+If no slots, return reason codes:
+NO_CANDIDATE_AVAILABILITY
+NO_INTERVIEWER_AVAILABILITY
+NO_COMMON_SLOT
+NO_QUALIFIED_INTERVIEWER
+ALL_SLOTS_CONFLICTED
+OUTSIDE_WORKING_HOURS
+DATE_RANGE_EXHAUSTED
+
+============================================================
+PHASE 12 — BOOKING + CONCURRENCY + IDEMPOTENCY
+============================================================
+Implement:
+POST /api/interviews/{id}/book
+
+InterviewBookingService.
+
+Flow:
+authenticate -> authorize -> validate candidate/job/process/round ->
+validate interviewer -> validate participants/dependency ->
+fresh availability -> fresh conflict check -> concurrency protection ->
+create/update participants -> scheduled times -> SCHEDULED ->
+calendar record -> notifications -> audit -> commit.
+
+Prevent:
+- double booking
+- stale slots
+- duplicate requests
+- double click
+- two recruiters booking same slot
+- inactive interviewer
+- invalid round
+- cancelled/completed round
+
+Implement idempotency key support.
+
+Explain PostgreSQL transaction/locking strategy.
+
+Never claim booking success unless transaction succeeds.
+
+============================================================
+PHASE 13 — NORMAL RECRUITER SCHEDULING
+============================================================
+Connect all scheduling components.
+
+Example:
+"Schedule Rahul's Java technical interview next week for 60 minutes,
+prefer afternoon, exclude Friday, and ensure Arjun and a Java interviewer
+are available."
+
+Flow:
+identify candidate -> job -> current round -> requirements ->
+required participants -> eligible interviewer -> availability ->
+calendar conflicts -> working hours -> timezone -> duration/buffer ->
+slots -> ranking -> recommendation -> recruiter confirmation ->
+fresh validation -> booking -> calendar -> notifications -> audit.
+
+Return explainable recommendation and alternatives.
+
+============================================================
+PHASE 14 — REUSABLE RESCHEDULING ENGINE
+============================================================
+Create:
+InterviewReschedulingService
+
+APIs:
+POST /api/interviews/{id}/reschedule
+POST /api/interviews/{id}/cancel
+
+Reusable flow:
+EVENT
+-> RESCHEDULE_REQUIRED
+-> eligible interviewers
+-> candidate availability
+-> participant availability
+-> calendars
+-> common slots
+-> rank
+-> confirmation
+-> fresh validation
+-> booking
+-> SCHEDULED
+
+Triggers:
+- interviewer cancellation
+- candidate reschedule
+- recruiter reschedule
+- calendar conflict
+- interviewer unavailable
+- calendar sync issue
+- interviewer decline
+
+Respect maximum_reschedules.
+
+Candidate stage never changes during rescheduling.
+
+============================================================
+PHASE 15 — INTERVIEWER CANCELLATION
+============================================================
+Critical scenario.
+
+Implement:
+POST /api/interviews/{id}/interviewer-cancel
+
+Rules:
+1. Authenticate interviewer.
+2. Verify assigned participant.
+3. Verify interview has not started.
+4. Record cancellation.
+5. Round -> RESCHEDULE_REQUIRED.
+6. Candidate stage unchanged.
+7. Cancel/update calendar event.
+8. Trigger reusable rescheduling workflow.
+9. Find qualified replacement.
+10. Check candidate and replacement availability.
+11. Find common slots.
+12. Rank.
+13. Return recommendations.
+
+Example:
+Candidate TECHNICAL
+Round SCHEDULED
+Interviewer Rahul
+
+Rahul cancels:
+Candidate TECHNICAL
+Round RESCHEDULE_REQUIRED
+
+After confirmation:
+Candidate TECHNICAL
+Round SCHEDULED
+
+Do NOT simply stop at CANCELLED.
+
+Audit:
+INTERVIEWER_CANCELLED
+REPLACEMENT_FOUND
+RESCHEDULING_SLOT_FOUND
+INTERVIEW_RESCHEDULED
+
+============================================================
+PHASE 16 — BACKUP + REPLACEMENT
+============================================================
+Implement:
+POST /api/interviews/{id}/find-replacement
+POST /api/interviews/{id}/switch-interviewer
+
+Priority:
+1. Qualified BACKUP same time.
+2. Other qualified same time.
+3. Qualified interviewer another time.
+4. Another future valid slot.
+
+Check skills, proficiency, domain, active status, availability, calendar,
+workload.
+
+Policies:
+ASK_BEFORE_REPLACEMENT
+AUTO_SWITCH_IF_QUALIFIED
+
+On switch:
+- remove/close old assignment
+- add REPLACEMENT
+- update primary assignment as appropriate
+- update calendar
+- preserve round/interview identity
+- increment reschedule count
+- notifications
+- audit
+
+Handle:
+backup available/unavailable;
+same-time replacement;
+later replacement;
+no replacement;
+replacement becomes unavailable before confirmation;
+inactive/unqualified replacement.
+
+============================================================
+PHASE 17 — PARTICIPANT DECLINE + RESCHEDULING
+============================================================
+Handle:
+- interviewer declines -> DECLINED -> replacement/rescheduling
+- candidate reschedules -> RESCHEDULE_REQUIRED -> same scheduling engine
+- recruiter reschedules -> same engine
+- candidate cancellation -> appropriate state, no progression
+- recruiter intentional cancellation -> CANCELLED, no automatic reschedule
+- cancellation after interview starts -> reject pre-interview cancellation logic
+
+============================================================
+PHASE 18 — PIPELINE CONSISTENCY
+============================================================
+If candidate FAILS:
+- candidate REJECTED
+- process REJECTED
+- cancel/invalidate future scheduled rounds
+- cancel related calendar events
+- notifications
+- audit
+
+If candidate withdraws:
+- prevent new scheduling
+- cancel future rounds
+- notify
+
+If dependency is incomplete:
+- prevent scheduling dependent round.
+
+If job closes:
+- use explicit business rule; never silently delete interview data.
+
+============================================================
+PHASE 19 — CALENDAR PROVIDER ABSTRACTION
+============================================================
+Create:
+CalendarProvider interface
+
+Methods:
+createEvent()
+updateEvent()
+cancelEvent()
+getEvent()
+checkAvailability()
+
+Create GoogleCalendarProvider and CalendarService.
+
+Keep Google-specific code isolated.
+
+Environment:
+GOOGLE_CLIENT_ID
+GOOGLE_CLIENT_SECRET
+GOOGLE_REDIRECT_URI
+
+Store provider/external_event_id/meeting_link/times/status.
+
+Handle timeout, 401/403, duplicate event, update failure, cancellation
+failure and retryable errors.
+
+Do not mark calendar sync successful until it actually succeeds.
+
+============================================================
+PHASE 20 — GOOGLE OAUTH + CALENDAR + MEET
+============================================================
+Implement:
+- OAuth authorization
+- callback
+- token refresh
+- calendar access
+- event creation/update/cancel
+- meeting link generation where supported
+
+When booked:
+create event -> add participants -> meeting link -> save external ID/link.
+
+When rescheduled:
+update existing event where possible, avoiding duplicates.
+
+When cancelled:
+cancel external event.
+
+Keep secrets backend-only.
+
+============================================================
+PHASE 21 — GOOGLE CALENDAR WEBHOOK + RECONCILIATION
+============================================================
+Implement:
+POST /api/integrations/google-calendar/webhook
+
+Detect:
+- new conflict
+- event deleted
+- event time changed
+- attendee declined
+- calendar unavailable
+
+If a scheduled future interview becomes invalid:
+- RESCHEDULE_REQUIRED
+- invoke rescheduling workflow
+- candidate stage unchanged
+
+Prevent webhook loops and process events idempotently.
+
+============================================================
+PHASE 22 — NOTIFICATIONS
+============================================================
+Create:
+NotificationService
+EmailNotificationService
+SmsNotificationService interface
+
+Events:
+INTERVIEW_SCHEDULED
+INTERVIEW_RESCHEDULED
+INTERVIEW_CANCELLED
+INTERVIEWER_CANCELLED
+INTERVIEWER_REPLACED
+INTERVIEW_INVITATION
+INTERVIEW_INVITATION_DECLINED
+INTERVIEW_REMINDER
+
+Persist notifications even if actual providers are not yet configured.
+
+Failure of email/SMS must not roll back successful booking.
+Persist FAILED and support retry.
+
+============================================================
+PHASE 23 — REMINDERS
+============================================================
+Implement:
+- 24-hour reminder
+- 1-hour reminder
+
+Prevent duplicates.
+
+On reschedule:
+invalidate old reminders and create new ones.
+
+On cancellation:
+cancel reminders.
+
+Retry notification failures safely.
+
+============================================================
+PHASE 24 — AUDIT LOGGING
+============================================================
+Create AuditService.
+
+Record:
+USER_CREATED
+USER_STATUS_CHANGED
+CANDIDATE_CREATED
+JOB_CREATED
+INTERVIEW_PROCESS_CREATED
+INTERVIEW_SCHEDULED
+INTERVIEW_RESCHEDULED
+INTERVIEW_CANCELLED
+INTERVIEWER_CANCELLED
+INTERVIEWER_REPLACED
+REPLACEMENT_FOUND
+ROUND_COMPLETED
+ROUND_RESULT_UPDATED
+CANDIDATE_STATUS_CHANGED
+CALENDAR_SYNC_FAILED
+NOTIFICATION_FAILED
+
+Provide:
+GET /api/admin/audit-logs
+
+Filter by actor/action/entity/date range.
+
+============================================================
+PHASE 25 — ADMIN + ANALYTICS
+============================================================
+Implement:
+GET /api/admin/analytics/overview
+GET /api/admin/analytics/scheduling
+GET /api/admin/audit-logs
+
+Metrics:
+- candidates total/by stage
+- interviews scheduled/completed/cancelled/rescheduled
+- scheduling success rate
+- average scheduling time
+- interviewer utilization
+- replacement count
+- conflict count
+- calendar failure count
+- notification failure count
+
+Admin manages:
+users
+roles
+scheduling configuration
+replacement policy
+working hours
+maximum reschedules
+
+============================================================
+PHASE 26 — AGENTIC AI ORCHESTRATION
+============================================================
+Only after deterministic backend is complete.
+
+Use a Spring AI version compatible with the selected Spring Boot 3.x version.
+Do not blindly choose the newest Spring AI release.
+
+AI tools:
+findCandidate()
+getCandidateSkills()
+getCandidateStatus()
+getCandidatePipeline()
+getJob()
+getJobSkills()
+getInterviewProcess()
+getCurrentRound()
+getRoundRequirements()
+getInterviewStatus()
+findInterviewers()
+getInterviewerSkills()
+matchInterviewers()
+getCandidateAvailability()
+getInterviewerAvailability()
+getCalendarEvents()
+findCommonSlots()
+checkConflicts()
+rankSlots()
+findReplacementInterviewer()
+switchInterviewer()
+bookInterview()
+rescheduleInterview()
+cancelInterview()
+advanceCandidateToNextRound()
+markCandidateRejected()
+
+AI must not:
+- access DB directly
+- execute SQL
+- invent facts
+- invent availability
+- invent skills
+- bypass RBAC
+- mark PASS/FAIL without authorized backend operation
+- book without backend validation
+- claim success without tool result
+
+Hard constraints remain in Java services.
+
+============================================================
+PHASE 27 — AI CONFIRMATION + SAFETY
+============================================================
+Read-only tool calls can execute automatically.
+
+Consequential operations:
+- booking
+- rescheduling
+- cancelling
+- interviewer switching
+
+require explicit recruiter confirmation unless configured for
+AUTO_SWITCH_IF_QUALIFIED.
+
+Return structured:
+interpretedRequest
+candidate
+round
+eligibleInterviewers
+recommendedSlots
+alternatives
+reason
+confirmationRequired
+action
+
+Backend refusals must be respected and explained.
+
+============================================================
+PHASE 28 — COMPLETE BACKEND TESTING
+============================================================
+Create unit/integration tests for:
+
+AUTH:
+register, login, bad password, invalid JWT, RBAC.
+
+CANDIDATE/JOB:
+CRUD, duplicate skills, invalid states.
+
+PIPELINE:
+valid progression, invalid progression, PASS, FAIL, HOLD,
+future-round invalidation.
+
+INTERVIEWER:
+skill, proficiency, domain, inactive interviewer.
+
+SCHEDULING:
+availability, no common slot, calendar conflict, buffer, working hours,
+timezone, notice period.
+
+BOOKING:
+success, duplicate, stale slot, concurrency, unauthorized.
+
+CANCELLATION:
+interviewer cancel, recruiter cancel, candidate reschedule,
+after-start cancellation.
+
+REPLACEMENT:
+backup, no backup, other interviewer, no qualified replacement,
+same slot, later slot, replacement changes before confirmation.
+
+CALENDAR:
+success, update, cancel, token expiry, API failure, webhook.
+
+NOTIFICATIONS:
+success, failure, retry, duplicate prevention.
+
+AI:
+parsing, correct tool sequence, no candidate, no slot,
+confirmation, backend refusal.
+
+============================================================
+PHASE 29 — API DOCUMENTATION
+============================================================
+Complete Swagger/OpenAPI.
+
+Document:
+- authentication
+- roles
+- every endpoint
+- request/response examples
+- errors
+- scheduling
+- cancellation
+- replacement
+- rescheduling
+
+Provide curl/Postman examples and backend README.
+
+============================================================
+PHASE 30 — DEPLOY BACKEND
+============================================================
+Deploy:
+Backend -> Render Web Service
+Database -> Supabase PostgreSQL
+
+Environment:
+DATABASE_URL
+DB_USERNAME
+DB_PASSWORD
+JWT_SECRET
+CORS_ALLOWED_ORIGINS
+GOOGLE_CLIENT_ID
+GOOGLE_CLIENT_SECRET
+GOOGLE_REDIRECT_URI
+AI_API_KEY
+EMAIL_API_KEY
+EMAIL_FROM
+APP_BASE_URL
+
+Use:
+server.port=${PORT:8080}
+
+Ensure:
+- no secrets committed
+- HTTPS
+- explicit CORS
+- Actuator health
+- Flyway startup
+- production logging
+- correct error handling
+
+============================================================
+PHASE 31 — FRONTEND FOUNDATION
+============================================================
+Only now build frontend.
+
+Use:
+React
+Vite
+TypeScript
+React Router
+Axios
+Tailwind CSS
+
+Structure:
+src/
+  api
+  auth
+  components
+  layouts
+  pages
+  hooks
+  context
+  types
+  utils
+  routes
+
+Implement:
+- login
+- registration
+- protected routes
+- role-based routes
+- API client
+- JWT handling
+- loading/error states
+- toast/notification system
+
+No business rules in frontend.
+
+============================================================
+PHASE 32 — ROLE DASHBOARDS
+============================================================
+Recruiter:
+overview, candidates, jobs, interviews, scheduling, notifications.
+
+Interviewer:
+upcoming interviews, availability, assigned interviews,
+cancel interview, result submission.
+
+Candidate:
+profile, pipeline, upcoming interviews, availability, reschedule.
+
+Admin:
+users, analytics, audit logs, scheduling configuration,
+integration health.
+
+============================================================
+PHASE 33 — CANDIDATE + JOB + PIPELINE UI
+============================================================
+Create:
+- candidate list/detail
+- candidate skills
+- job list/detail
+- job requirements
+- pipeline visualization
+- current stage
+- round status/result
+
+Clearly separate candidate status from round status.
+
+============================================================
+PHASE 34 — AI + FORM SCHEDULING UI
+============================================================
+Provide two modes:
+
+FORM:
+candidate, job, round, duration, date range, preferred interviewer,
+preferred time, excluded days, required participants.
+
+AI:
+natural-language input.
+
+Example:
+"Schedule Rahul's Java technical interview next week for 60 minutes,
+prefer afternoon and exclude Friday."
+
+Display:
+- interpreted request
+- eligible interviewer
+- recommended slots
+- alternatives
+- reasons
+- conflicts
+- confirmation
+
+Never display a slot as guaranteed until backend booking succeeds.
+
+============================================================
+PHASE 35 — INTERVIEW/CALENDAR UI
+============================================================
+Create:
+- interview details
+- upcoming interviews
+- calendar view
+- meeting link
+- participants
+- interviewer
+- round
+- date/time/timezone
+- status
+- reschedule
+- cancel
+
+Statuses:
+SCHEDULED
+RESCHEDULE_REQUIRED
+COMPLETED
+CANCELLED
+etc.
+
+============================================================
+PHASE 36 — CANCELLATION + REPLACEMENT UI
+============================================================
+Interviewer clicks Cancel Interview.
+
+Call:
+POST /api/interviews/{id}/interviewer-cancel
+
+Show:
+"Interview requires rescheduling."
+
+Display:
+- replacement interviewer
+- skill match
+- available slots
+- recommended slot
+- alternatives
+
+Recruiter confirms.
+
+Candidate stage remains unchanged.
+
+Also support candidate/recruiter rescheduling and recruiter cancellation.
+
+============================================================
+PHASE 37 — NOTIFICATIONS + ADMIN UI
+============================================================
+Create notification center, unread count, reminders, scheduling status,
+replacement messages.
+
+Admin charts:
+- candidate stages
+- interview status
+- rescheduling
+- interviewer utilization
+- scheduling success
+- conflicts
+- calendar failures
+- audit activity
+
+============================================================
+PHASE 38 — FRONTEND EDGE CASES
+============================================================
+Handle:
+- expired JWT
+- unauthorized/forbidden
+- not found
+- no interviewer
+- no slot
+- slot taken while booking
+- interviewer cancellation
+- replacement unavailable
+- calendar failure
+- notification failure
+- maximum reschedules
+- rejected candidate
+- cancelled round
+- network failure
+- loading
+- empty state
+
+If a slot becomes unavailable:
+"This slot was just taken. Here are the latest available options."
+Then request fresh slots.
+
+============================================================
+PHASE 39 — COMPLETE END-TO-END INTEGRATION
+============================================================
+Run:
+1. Recruiter login
+2. Create candidate
+3. Add candidate skills
+4. Create job
+5. Add job skills
+6. Create process
+7. Configure interviewer skills
+8. Configure availability
+9. Natural-language request
+10. AI interpretation
+11. Qualified interviewer
+12. Slots
+13. UI recommendation
+14. Recruiter confirmation
+15. Fresh backend validation
+16. Booking
+17. Calendar
+18. Meet
+19. Notification
+20. Audit
+21. Interviewer cancellation
+22. RESCHEDULE_REQUIRED
+23. Replacement
+24. New slots
+25. Confirmation
+26. Calendar update
+27. Notifications
+28. Interview completion
+29. PASS/FAIL/HOLD
+
+Also test:
+no slot, interviewer decline, candidate reschedule,
+double booking, calendar failure, future-round invalidation.
+
+============================================================
+PHASE 40 — FINAL POLISH + HACKATHON DEMO
+============================================================
+Prepare:
+- README
+- architecture diagram
+- database diagram
+- API documentation
+- environment example
+- demo seed data
+- deployment guide
+- troubleshooting
+- test report
+- security checklist
+- final demo script
+
+FINAL DEMO SCENARIOS:
+
+1. Normal AI scheduling.
+2. Preferred interviewer unavailable.
+3. Interviewer cancellation -> replacement -> new slot.
+4. Slot taken before confirmation.
+5. Interviewer decline -> replacement.
+6. Candidate rescheduling.
+7. Technical FAIL -> REJECTED + future rounds invalidated.
+8. Technical PASS -> MANAGERIAL.
+
+FINAL DESIGN STATEMENT:
+
+The system is NOT:
+LLM -> Database -> Booking
+
+The system IS:
+LLM -> Controlled Tools -> Spring Boot Services
+    -> deterministic validation -> Supabase PostgreSQL/external integrations
+
+PostgreSQL stores facts.
+Spring Boot enforces rules.
+AI orchestrates and explains.
+React provides the user experience.
+
+END OF MASTER PROMPT
