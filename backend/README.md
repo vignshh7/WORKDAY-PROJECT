@@ -6,7 +6,7 @@ pipelines, availability, and deterministic interview scheduling. A future Agenti
 will orchestrate this backend through controlled service methods; it will never access the
 database directly.
 
-Status: **Phase 9 complete** (availability + working hours + timezones). See [Implementation Phases](#implementation-phases).
+Status: **Phase 10 complete** (conflict detection). See [Implementation Phases](#implementation-phases).
 
 > Phase numbering follows the project's master prompt (Phase 0–40), which supersedes an
 > earlier, coarser 17-phase draft. Phases 1 and 2 below were built under the old numbering
@@ -177,8 +177,8 @@ Once Swagger is wired (Phase 17): `http://localhost:8080/swagger-ui.html`
 | 7 | Interview process + state machine | ✅ Done |
 | 8 | Interviewer + skill matching | ✅ Done |
 | 9 | Availability + working hours + timezones | ✅ Done |
-| 10 | Conflict detection | ⏳ Next |
-| 11 | Slot finding + ranking | Pending |
+| 10 | Conflict detection | ✅ Done |
+| 11 | Slot finding + ranking | ⏳ Next |
 | 12 | Booking + concurrency + idempotency | Pending |
 | 13 | Normal recruiter scheduling (wiring) | Pending |
 | 14 | Reusable rescheduling engine | Pending |
@@ -537,6 +537,49 @@ instance and no local Postgres/Docker in this environment, so this was verified 
 **Exercise all four endpoints for real — including a same-timezone overlap, a cross-timezone
 overlap, a DST-transition date, a weekend attempt, and an outside-working-hours attempt —
 before starting Phase 10.**
+
+## Conflict Detection (Phase 10)
+
+`ConflictDetectionService.checkConflicts` (`POST /api/scheduling/check-conflicts`,
+RECRUITER/ADMIN) is a single read-only pass over a *proposed* window for a round — the spec
+requires "a fresh conflict check immediately before booking," so Phase 12's booking flow is
+expected to call this exact method again right before committing, not just once at
+slot-finding time. Request: `roundId`, `start`/`end` (both `OffsetDateTime`, so comparisons
+are correct regardless of which offset each side used), an optional `interviewerId`
+(an interviewer *profile* id, resolved to its user internally), and an optional
+`requiredParticipants` list of `{userId, role}` for the recruiter/hiring-manager participants
+the spec calls out beyond candidate/interviewer. Response: `{hasConflicts, conflicts[]}`,
+reusing the existing `ConflictResponse` DTO — `hasConflicts` is just "is `conflicts` non-empty."
+
+**One query does most of the work.** `InterviewRoundRepository.findScheduledOverlapsForUser`
+(built in Phase 3, javadoc already said "the basis for fresh conflict checks before booking")
+is called once per participant with the window expanded by the round's `buffer_minutes` on
+each side. Each hit is then classified against the *unexpanded* request window:
+
+- Overlaps the real window -> the participant's own conflict type (`CANDIDATE_CONFLICT`,
+  `INTERVIEWER_CONFLICT`, `RECRUITER_CONFLICT`, `HIRING_MANAGER_CONFLICT`), plus a
+  `CALENDAR_CONFLICT` if that conflicting round already has an active (`PENDING`/`CREATED`/
+  `UPDATED`) `calendar_events` row — a stronger signal than a plain internal double-booking,
+  since it means an external calendar entry would need to be touched too.
+- Falls inside the buffer-expanded window but *not* the real one (including two meetings that
+  touch with zero gap) -> `BUFFER_CONFLICT` instead. This one query, split this way, covers
+  every scenario the spec lists by name: exact/partial/contained overlap -> the role conflict;
+  adjacent meetings and small-gap violations -> `BUFFER_CONFLICT`; no nearby meeting -> nothing.
+
+The other checks are single, independent conditions: `INVALID_TIME_RANGE` (`end <= start` —
+short-circuits the rest, since nothing else means anything against a nonsensical range),
+`NOTICE_PERIOD_CONFLICT` (`start` inside `scheduling_config.minimum_booking_notice_minutes`
+from now), `WORKING_HOURS_CONFLICT` (reuses Phase 9's `WorkingHoursService` — working hours
+and weekend policy, read from the request's own `OffsetDateTime.toLocalTime()`/`toLocalDate()`
+so no separate timezone field is needed on the request), and `ROUND_DEPENDENCY_CONFLICT`
+(the round's `dependsOnRound`, if any, isn't `COMPLETED` with a `PASS` result yet).
+
+**Verification:** same constraint as Phases 7-9 — no network route to the configured Supabase
+instance and no local Postgres/Docker in this environment, so this was verified with a clean
+`compile`/`test-compile`/`package` under JDK 21, not a live boot or real HTTP requests.
+**Exercise every scenario the spec lists by name — exact overlap, partial overlap, contained
+overlap, adjacent meetings, a buffer violation, no conflict, and a cross-timezone pair — against
+a real database before starting Phase 11.**
 
 ## Deployment Preparation (later)
 
