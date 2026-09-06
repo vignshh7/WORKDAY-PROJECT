@@ -38,20 +38,32 @@ spring:
     baseline-on-migrate: false
 
   ai:
-    # Only Anthropic is on the classpath, but this pins it explicitly rather than relying on
-    # "one provider present" auto-selection.
+    # Only the OpenAI model client is on the classpath, but this pins it explicitly rather than
+    # relying on "one provider present" auto-selection.
     model:
-      chat: anthropic
-    anthropic:
+      chat: openai
+    openai:
+      # Points the OpenAI client at OpenRouter (https://openrouter.ai/api/v1) - a single
+      # OpenAI-compatible gateway across many providers (Anthropic, Meta, NVIDIA, etc.), picked
+      # over Gemini's own OpenAI-compatibility endpoint after live testing found that every
+      # current Gemini model requires a "thought_signature" round-tripped through tool calls
+      # (see https://ai.google.dev/gemini-api/docs/thought-signatures) that the generic OpenAI
+      # wire protocol has nowhere to carry - a known, currently-unresolved ecosystem-wide gap,
+      # not specific to this project. OpenRouter gives access to models with reliable
+      # tool-calling support instead.
+      # Spring AI's OpenAI client always appends "/v1/chat/completions" to base-url itself
+      # (OpenAiApi.Builder's default completionsPath), so base-url must stop at "/api", not
+      # "/api/v1" - otherwise the request lands on "/api/v1/v1/chat/completions", which
+      # OpenRouter's routing doesn't recognize (falls through to their website's 404 page
+      # rather than a JSON API error - caught live, not guessed).
+      base-url: https://openrouter.ai/api
       # Blank by default - the app boots fine either way (same "fails at use, not at boot"
       # pattern as calendar.provider=google / notification.email.provider=smtp); only
       # POST /api/ai/schedule actually needs a real key.
       api-key: ${AI_API_KEY:}
       chat:
         options:
-          # An alias, not a dated snapshot, so it keeps resolving to Anthropic's current model
-          # without needing a code change - override via AI_MODEL for a pinned/newer model.
-          model: ${AI_MODEL:claude-3-5-sonnet-latest}
+          model: ${AI_MODEL:nvidia/nemotron-3.5-lightning:free}
 
 # Calendar provider: "noop" (default, no external calls) or "google" (requires GOOGLE_* env vars)
 calendar:

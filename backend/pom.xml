@@ -139,10 +139,16 @@
       <version>${google-api-services-calendar.version}</version>
     </dependency>
 
-    <!-- Agentic AI orchestration (wired starting Phase 26); inert unless AI_API_KEY is set -->
+    <!-- Agentic AI orchestration (wired starting Phase 26); inert unless AI_API_KEY is set.
+         Uses the OpenAI starter pointed at OpenRouter (https://openrouter.ai/api/v1, see
+         application.yml) - a single OpenAI-compatible gateway across many providers - rather
+         than a provider-specific Spring AI starter, after live testing found every current
+         Gemini model requires a "thought_signature" round-tripped through tool calls that the
+         generic OpenAI wire protocol can't carry (a known, currently-unresolved ecosystem-wide
+         gap, not specific to this project). -->
     <dependency>
       <groupId>org.springframework.ai</groupId>
-      <artifactId>spring-ai-starter-model-anthropic</artifactId>
+      <artifactId>spring-ai-starter-model-openai</artifactId>
     </dependency>
 
     <!-- Test -->
