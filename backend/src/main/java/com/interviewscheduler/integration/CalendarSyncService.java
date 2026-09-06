@@ -7,7 +7,9 @@ import com.interviewscheduler.common.exception.CalendarIntegrationException;
 import com.interviewscheduler.interview.InterviewParticipant;
 import com.interviewscheduler.interview.InterviewParticipantRepository;
 import com.interviewscheduler.interview.InterviewRound;
+import com.interviewscheduler.interview.ParticipantRole;
 import com.interviewscheduler.interview.ParticipantStatus;
+import com.interviewscheduler.user.User;
 import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -19,6 +21,14 @@ import java.util.UUID;
 
 /**
  * Bridges the DB {@link CalendarEvent} record and the active {@link CalendarProvider}.
+ *
+ * <p>Per-user OAuth (Phase 20 revision): the interview event is created on the assigned
+ * interviewer's own Google Calendar - not a shared org-wide account - with every other
+ * participant (candidate, recruiter, hiring manager) invited by email address instead; they
+ * don't need their own connection just to receive a calendar invite. The interviewer's user id
+ * is recorded on the {@link CalendarEvent} row itself ({@code calendarOwnerUser}) so a later
+ * update/cancel/reconciliation always uses the correct token even if the round's assigned
+ * interviewer has since changed (e.g. a Phase 16 switch).
  *
  * <p>All methods run within the caller's existing {@code @Transactional} unit so that a
  * provider failure (→ {@link CalendarEventStatus#FAILED}) is committed atomically with the
@@ -51,8 +61,11 @@ public class CalendarSyncService {
      */
     public void syncCreate(CalendarEvent event, List<String> attendeeEmails) {
         InterviewRound round = event.getInterviewRound();
+        User calendarOwner = interviewerUserOf(round);
+        event.setCalendarOwnerUser(calendarOwner);
         CalendarEventRequest request = new CalendarEventRequest(
                 round.getId(),
+                calendarOwner == null ? null : calendarOwner.getId(),
                 buildTitle(round),
                 buildDescription(round),
                 event.getStartTime(),
@@ -106,7 +119,8 @@ public class CalendarSyncService {
     private void cancelOne(CalendarEvent event) {
         if (event.getExternalEventId() != null) {
             try {
-                calendarProvider.cancelEvent(event.getExternalEventId());
+                UUID ownerId = event.getCalendarOwnerUser() == null ? null : event.getCalendarOwnerUser().getId();
+                calendarProvider.cancelEvent(event.getExternalEventId(), ownerId);
             } catch (CalendarIntegrationException e) {
                 log.warn("Provider cancel failed for externalId={}: {}",
                         event.getExternalEventId(), e.getMessage());
@@ -116,6 +130,15 @@ public class CalendarSyncService {
         }
         event.setStatus(CalendarEventStatus.CANCELLED);
         calendarEventRepository.save(event);
+    }
+
+    /** The round's currently-assigned (non-REMOVED) INTERVIEWER participant, if any. */
+    private User interviewerUserOf(InterviewRound round) {
+        return interviewParticipantRepository.findByInterviewRoundId(round.getId()).stream()
+                .filter(p -> p.getParticipantRole() == ParticipantRole.INTERVIEWER && p.getStatus() != ParticipantStatus.REMOVED)
+                .findFirst()
+                .map(InterviewParticipant::getUser)
+                .orElse(null);
     }
 
     private String buildTitle(InterviewRound round) {

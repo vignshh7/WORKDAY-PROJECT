@@ -22,17 +22,17 @@ import java.time.OffsetDateTime;
 import java.util.UUID;
 
 /**
- * The single org-wide Google Calendar OAuth connection - see V20 migration javadoc. There is
- * intentionally no per-user row: {@link GoogleOAuthTokenService} always updates the most
- * recently connected row in place on reconnect rather than accumulating one per admin who
- * happens to run the authorize flow.
+ * One row per user's Google Calendar OAuth connection (see V22 migration javadoc - this was
+ * originally a single org-wide connection under Phase 20, revised to per-user). Each candidate,
+ * interviewer, or any other user connects their own calendar; {@code user_id} is unique, so
+ * {@link GoogleOAuthTokenService} always has at most one row to find per user.
  */
 @Entity
 @Table(name = "google_oauth_tokens")
 @Getter
 @Setter
 @NoArgsConstructor
-@ToString(exclude = {"accessToken", "refreshToken", "connectedByUser"})
+@ToString(exclude = {"accessToken", "refreshToken", "user"})
 @EqualsAndHashCode(of = "id")
 public class GoogleOAuthToken {
 
@@ -52,9 +52,10 @@ public class GoogleOAuthToken {
     @Column(nullable = false, length = 500)
     private String scope;
 
+    /** Whose calendar this connection is for - also who authorized it, since it's self-service. */
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
-    @JoinColumn(name = "connected_by_user_id", nullable = false)
-    private User connectedByUser;
+    @JoinColumn(name = "user_id", nullable = false)
+    private User user;
 
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)

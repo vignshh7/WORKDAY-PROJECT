@@ -842,92 +842,92 @@ those TODO blocks with real Google Calendar API v3 calls and adds the OAuth2 plu
 get an access token in the first place — new Maven dependencies (`google-api-client`,
 `google-oauth-client`, `google-api-services-calendar`, `google-http-client-gson`; no version
 was on the classpath already, so exact current Maven Central coordinates were looked up rather
-than guessed) and a new `google_oauth_tokens` table (migration V20).
+than guessed).
 
-**One org-wide connection, not one per user.** An ADMIN authorizes *one* Google account once;
-every interview event is created on that account's `primary` calendar, with every
-candidate/interviewer/recruiter invited as an attendee by email address — they never need their
-own Google OAuth connection. This matches Phase 19's own design (its TODO comments already
-called the calendar `"primary"`, singular) and keeps the flow to what a hackathon/demo setting
-can actually complete: one Google Cloud OAuth client, one consent screen click.
+**Revised to per-user OAuth** (superseding this phase's original org-wide design): every
+candidate and interviewer connects their *own* Google Calendar via a self-service "Connect
+Google Calendar" flow — `google_oauth_tokens` now holds one row per `user_id` (`UNIQUE`,
+migration V20 → V22) rather than a single shared connection. `GET /authorize` and `GET /status`
+are open to any authenticated user (no RBAC restriction) and always act on the caller's own
+connection; `GET /callback` stays the one genuinely public endpoint, as before.
 
-- **`GoogleOAuthService`** drives the authorization-code handshake:
-  `GET /api/integrations/google-calendar/authorize` (ADMIN) returns Google's consent URL, with
-  a one-time `state` value (an in-memory map, not a DB table — this is a short-lived CSRF
-  handshake, not data that needs to survive a restart) tying the eventual callback back to
-  whoever clicked it. `GET /api/integrations/google-calendar/callback` is the only endpoint in
-  the whole API that's genuinely public (`SecurityConfig` `permitAll`s it) — Google redirects
-  the admin's *browser* here directly with no way to attach our JWT, so the `state` round-trip
-  is the CSRF defense instead. `prompt=consent` is forced on every authorization URL so Google
-  always issues a `refresh_token`, even on a re-authorization (Google otherwise only grants one
-  on a account's *first-ever* consent for this app).
-- **`GoogleOAuthTokenService`** persists the single connection row and is the only thing that
-  knows about token refresh: `getValidAccessToken()` is called before every Calendar API call
-  and transparently refreshes if the stored token is within 60 seconds of expiring, so
-  `GoogleCalendarProvider` never has to think about token lifecycle.
-- **`GoogleCalendarProvider`** now does real work: `createEvent` requests a Google Meet
-  conference (`conferenceData` + `hangoutsMeet` solution key, `conferenceDataVersion=1`) and
-  returns the real `hangoutLink`; `updateEvent` patches an existing event; `cancelEvent` deletes
-  one and treats a 404 (already gone at Google) as success, per the interface's documented
-  contract. Every write uses `sendUpdates("none")` — this system already has its own
-  `NotificationService` (Phase 22) as the single source of truth for who was told what, so
-  Google is deliberately not asked to also email attendees directly.
-- **`GET /api/integrations/google-calendar/status`** (RECRUITER/ADMIN) reports whether a
-  connection exists, who connected it, and its token expiry — enough to confirm the setup
-  without needing DB access.
+- **`GoogleOAuthService`** drives the authorization-code handshake, per user: `buildAuthorizationUrl(userId)`
+  issues a one-time `state` (an in-memory map — a short-lived CSRF handshake, not data that needs
+  to survive a restart) tying the eventual callback back to whoever clicked it; `prompt=consent`
+  is forced so Google always issues a `refresh_token`, even on re-authorization. The OAuth scope
+  was widened from `calendar.events` to the full `calendar` scope, since `freebusy.query` (new,
+  see below) needs read access to the whole calendar, not just event management.
+- **`GoogleOAuthTokenService`** persists each user's own token row and refreshes it transparently
+  before every Calendar API call (`getValidAccessToken(userId)` / `forceRefreshAccessToken(userId)`,
+  both `REQUIRES_NEW` — see the transaction-isolation bug below, still relevant here since the
+  problem was never provider-specific).
+- **`GoogleCalendarProvider`** now takes a `calendarOwnerUserId`/`userId` on every method:
+  `createEvent`/`updateEvent` use `CalendarEventRequest.calendarOwnerUserId()`; `cancelEvent`/
+  `getEvent` take it as a parameter (recorded on the `CalendarEvent` row itself — see below, not
+  re-derivable from current participants); the new `getBusyIntervals(userId, from, to)` queries
+  `freebusy.query` for that user's own `primary` calendar. `createEvent` still requests a Google
+  Meet conference (`conferenceData` + `hangoutsMeet`, `conferenceDataVersion=1`) and returns the
+  real `hangoutLink`; every write still uses `sendUpdates("none")` since `NotificationService`
+  (Phase 22) is the single source of truth for who was told what.
+- **Whose calendar hosts the event:** the interview event is created on the *assigned
+  interviewer's* own calendar (`CalendarSyncService.interviewerUserOf(round)`), not a shared
+  account — every other participant (candidate, recruiter, hiring manager) is invited by email
+  address instead and doesn't need their own connection just to receive an invite. That owner is
+  written to `calendar_events.calendar_owner_user_id` (migration V23) at creation time and reused
+  for every later update/cancel/reconciliation, because the round's assigned interviewer can
+  change afterward (e.g. a Phase 16 switch) while the *original* event still belongs to whoever
+  created it.
+- **Slot finding overlay (`CalendarBusyTimeService` + `SlotFinderService`):** `availableWindowsFor`
+  (called for the candidate, every required participant, and each eligible interviewer) now
+  subtracts that user's Google-Calendar busy intervals from their app `Availability` windows
+  before the existing common-window intersection runs — "combine both... find only slots valid
+  for both" falls out of the existing pipeline with no special-casing per role. A user who hasn't
+  connected Google, or a lookup failure, reads as "no extra busy data" (never a hard blocker —
+  the app's own `Availability` table stays the source of truth) via `CalendarBusyTimeService`
+  catching `CalendarIntegrationException` and returning an empty list.
+- **Fresh conflict check before booking (`InterviewBookingService.hasGoogleConflict`):** right
+  before finalizing a booking, both the candidate's and the interviewer's Google Calendars are
+  re-checked for the exact proposed window, in addition to the existing DB-based
+  `ConflictDetectionService` check — same "purely additive" contract as the slot-finding overlay.
 
 **Known gap, carried from Phase 19, stated explicitly rather than silently fixed:** nothing in
 the booking/rescheduling orchestration (Phases 12–17) calls `updateEvent` — a reschedule or
 interviewer switch always cancels the old calendar event and creates a fresh one, because the
 new slot can land on a different interviewer or participant list, not just a different time on
-the same attendees. `updateEvent` is implemented correctly here and ready for a caller, but
-re-plumbing four already-verified phases to prefer an in-place update is a separate decision,
-not one to make as a side effect of this phase.
+the same attendees.
 
-**A real bug, found by live-testing against this exact new code path, not left for later:**
-the first live booking attempt with `calendar.provider=google` (Google Calendar not yet
-connected) returned `500 Unhandled exception ... UnexpectedRollbackException: Transaction
-silently rolled back because it has been marked as rollback-only` — instead of the booking
-succeeding with the calendar event marked `FAILED`, which is the explicit Phase 12 contract
-("calendar failure never rolls back booking"). Root cause: `GoogleOAuthTokenService
-.getValidAccessToken()` was `@Transactional` with the default `REQUIRED` propagation, so when
-it threw (no connection yet), it joined and poisoned the *same physical transaction* as the
-enclosing `InterviewBookingService.book()` call — Spring's transactional advice marks a
-transaction rollback-only the instant an unchecked exception crosses *any* `@Transactional`
-method boundary on it, regardless of whether something further up the call stack (here,
-`CalendarSyncService.syncCreate`'s `catch (CalendarIntegrationException)`) goes on to swallow
-it. The booking transaction itself never threw anything — it just found itself unable to
-commit. Fixed by switching `getValidAccessToken()` and `forceRefreshAccessToken()` to
-`Propagation.REQUIRES_NEW`, so a thrown exception only rolls back this method's own (suspended,
-independent) transaction and never touches the caller's. Re-ran the identical booking
-afterward: `200 SCHEDULED`, with the `calendar_events` row correctly `FAILED` and an
-`audit_logs` `CALENDAR_SYNC_FAILED` row recorded — exactly the intended behavior.
+**A real bug, found by live-testing, fixed before moving on (Phase 20's original finding, still
+the reason `REQUIRES_NEW` is used today):** the first live booking attempt with
+`calendar.provider=google` returned `500 UnexpectedRollbackException` instead of the booking
+succeeding with the calendar event marked `FAILED` (the explicit Phase 12 contract). Root cause:
+`GoogleOAuthTokenService`'s token methods were `@Transactional` with default `REQUIRED`
+propagation, so throwing (no connection yet) poisoned the *same physical transaction* as the
+enclosing booking call — Spring marks a transaction rollback-only the instant an unchecked
+exception crosses any `@Transactional` boundary on it, regardless of whether something further
+up the stack catches it. Fixed with `Propagation.REQUIRES_NEW`.
 
-**Verified live** against the real Supabase database with real HTTP requests, using a fresh
-candidate/job/process/interviewer (seeded via direct SQL for the interviewer profile — there is
-still no `POST /api/interviewers` endpoint, per Phase 8's own note that profiles are provisioned
-outside the API):
-- `GET /authorize` as a non-ADMIN correctly `403`s; as ADMIN with no `GOOGLE_CLIENT_ID`/
-  `GOOGLE_CLIENT_SECRET`/`GOOGLE_REDIRECT_URI` configured, correctly `502`s with a clear
-  "Google OAuth is not configured" message rather than a stack trace.
-- `GET /callback` with no `Authorization` header at all still reaches the handler (confirms
-  `SecurityConfig`'s `permitAll` is scoped correctly) and fails on the same "not configured"
-  check, not a `401`.
-- `GET /status` correctly reports `{"connected": false, "activeProvider": "noop"}` before any
-  connection exists, and enforces RECRUITER/ADMIN-only (`403` for a CANDIDATE).
-- With `calendar.provider=google` active (no OAuth credentials available in this environment to
-  complete a real consent screen — the same constraint Phase 19 documented), a booking against
-  the round above surfaced the `UnexpectedRollbackException` bug above; after the fix, the
-  identical request returned `200 SCHEDULED` with `calendar_events.status = FAILED` and
-  `provider = GOOGLE`, and cancelling that same round afterward (exercising `cancelEvent`'s
-  error path through the same fixed seam) also completed cleanly.
-- **Not verified**: an actual end-to-end OAuth consent screen + token exchange + real Google
-  Meet link creation, since no `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` pair was available in
-  this environment (same limitation Phase 19 flagged). Everything up to that boundary — the
-  authorization URL construction, state validation, RBAC, and every code path a failed/absent
-  connection exercises — was verified for real; running the actual consent flow once real
-  Google Cloud OAuth credentials are provisioned is the one remaining step before relying on
-  this in production.
+**Verified live** against the real Supabase database with real HTTP requests, after the per-user
+revision:
+- `GET /authorize` and `GET /status`, previously ADMIN/RECRUITER-only, now work for a plain
+  CANDIDATE caller (no more `403`) and act on that caller's own connection.
+- A booking with `calendar.provider=google` and neither the candidate nor the interviewer
+  connected still returns `200 SCHEDULED`, with `calendar_events.calendar_owner_user_id`
+  correctly set to the assigned interviewer's user id, `status = FAILED`, and an
+  `audit_logs` row carrying the new per-user message ("This user has not connected Google
+  Calendar...") — confirming the owner-tracking and the "never blocks booking" contract both
+  hold under the new model.
+- `POST /api/scheduling/recommend` against the same setup returns the identical ranked slots as
+  before the change (the new busy-interval subtraction is a no-op when nobody's connected),
+  confirming no regression in the Phase 11 slot-finding pipeline.
+- The same booking flow was also re-run with `calendar.provider=noop` (the default) end-to-end,
+  confirming zero behavior change for the common case — `calendar_events.status = CREATED` as
+  always, with `calendar_owner_user_id` now populated too (harmless, forward-compatible).
+- **Not verified**: an actual end-to-end OAuth consent screen, token exchange, real Google Meet
+  link creation, or a genuine Google-Calendar-detected conflict/busy interval, since no
+  `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` pair was available in this environment (same
+  limitation Phase 19 flagged). Every code path reachable without real credentials — the
+  self-service RBAC change, per-user token lookup/error messages, owner tracking, and the
+  busy-interval overlay's "no data available" path — was verified for real.
 
 ## Deployment Preparation (later)
 

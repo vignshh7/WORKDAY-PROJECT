@@ -11,6 +11,7 @@ import com.interviewscheduler.common.exception.InvalidBookingException;
 import com.interviewscheduler.common.exception.ResourceNotFoundException;
 import com.interviewscheduler.common.exception.SchedulingException;
 import com.interviewscheduler.common.idempotency.IdempotencyService;
+import com.interviewscheduler.integration.CalendarBusyTimeService;
 import com.interviewscheduler.integration.CalendarEvent;
 import com.interviewscheduler.integration.CalendarEventRepository;
 import com.interviewscheduler.integration.CalendarEventStatus;
@@ -96,6 +97,7 @@ public class InterviewBookingService {
     private final ParticipantRoleResolver participantRoleResolver;
     private final IdempotencyService idempotencyService;
     private final AuditService auditService;
+    private final CalendarBusyTimeService calendarBusyTimeService;
 
     @Transactional
     public BookingResponse book(UUID roundId, BookingRequest request) {
@@ -149,6 +151,14 @@ public class InterviewBookingService {
             throw new SchedulingException("A fresh conflict check failed just before booking",
                     SchedulingReasonCode.ALL_SLOTS_CONFLICTED.name());
         }
+        if (hasGoogleConflict(candidate.getUser().getId(), request.start(), request.end())) {
+            throw new SchedulingException("Candidate's Google Calendar shows a conflict for the proposed time",
+                    SchedulingReasonCode.ALL_SLOTS_CONFLICTED.name());
+        }
+        if (hasGoogleConflict(interviewer.getUser().getId(), request.start(), request.end())) {
+            throw new SchedulingException("Interviewer's Google Calendar shows a conflict for the proposed time",
+                    SchedulingReasonCode.ALL_SLOTS_CONFLICTED.name());
+        }
 
         upsertParticipant(round, candidate.getUser(), ParticipantRole.CANDIDATE);
         upsertParticipant(round, interviewer.getUser(), ParticipantRole.INTERVIEWER);
@@ -197,6 +207,18 @@ public class InterviewBookingService {
                 .filter(a -> a.getStatus() == AvailabilityStatus.AVAILABLE)
                 .map(a -> timezoneService.toUtcRange(a.getDate(), a.getStartTime(), a.getEndTime(), a.getTimezone()))
                 .anyMatch(range -> !range.start().isAfter(start.toInstant()) && !range.end().isBefore(end.toInstant()));
+    }
+
+    /**
+     * Fresh, right-before-booking check against the user's own connected Google Calendar (in
+     * addition to the DB-based {@link ConflictDetectionService} check above) - if they haven't
+     * connected Google, this always reads as "no conflict" (see {@link CalendarBusyTimeService}),
+     * exactly like {@link #isStillAvailable} narrows rather than replaces this system's own
+     * {@code Availability} records.
+     */
+    private boolean hasGoogleConflict(UUID userId, OffsetDateTime start, OffsetDateTime end) {
+        return calendarBusyTimeService.busyIntervals(userId, start, end).stream()
+                .anyMatch(busy -> busy.start().isBefore(end) && busy.end().isAfter(start));
     }
 
     private void upsertParticipant(InterviewRound round, User user, ParticipantRole role) {

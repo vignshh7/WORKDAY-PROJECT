@@ -8,6 +8,7 @@ import com.interviewscheduler.availability.WorkingHoursService;
 import com.interviewscheduler.candidate.Candidate;
 import com.interviewscheduler.candidate.CandidateRepository;
 import com.interviewscheduler.common.exception.ResourceNotFoundException;
+import com.interviewscheduler.integration.CalendarBusyTimeService;
 import com.interviewscheduler.interview.InterviewRound;
 import com.interviewscheduler.interview.InterviewRoundRepository;
 import com.interviewscheduler.interviewer.InterviewerMatchResult;
@@ -20,7 +21,9 @@ import java.time.DayOfWeek;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalTime;
+import java.time.OffsetDateTime;
 import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
@@ -50,6 +53,7 @@ public class SlotFinderService {
     private final TimezoneService timezoneService;
     private final SchedulabilityGuard schedulabilityGuard;
     private final ParticipantRoleResolver participantRoleResolver;
+    private final CalendarBusyTimeService calendarBusyTimeService;
 
     @Transactional(readOnly = true)
     public SchedulingResponse findSlots(SchedulingRequest request) {
@@ -206,13 +210,70 @@ public class SlotFinderService {
         return starts;
     }
 
+    /**
+     * The app's own {@code Availability} records for this user, minus any busy time read back
+     * from their connected Google Calendar (if any) - see {@link CalendarBusyTimeService} for
+     * why a missing/failed Google lookup never blocks this, only narrows it when data exists.
+     * Called for the candidate, every required participant, and each eligible interviewer, so
+     * "combine both with application availability... find only slots valid for both" falls out
+     * of the existing common-window intersection below without any special-casing per role.
+     */
     private List<TimezoneService.TimeRange> availableWindowsFor(UUID userId, SchedulingRequest request) {
-        return availabilityRepository.findByUserIdAndDateBetween(userId, request.dateFrom(), request.dateTo())
+        List<TimezoneService.TimeRange> appWindows = availabilityRepository
+                .findByUserIdAndDateBetween(userId, request.dateFrom(), request.dateTo())
                 .stream()
                 .filter(a -> a.getStatus() == AvailabilityStatus.AVAILABLE)
                 .map(a -> timezoneService.toUtcRange(a.getDate(), a.getStartTime(), a.getEndTime(), a.getTimezone()))
                 .sorted(Comparator.comparing(TimezoneService.TimeRange::start))
                 .toList();
+        if (appWindows.isEmpty()) {
+            return appWindows;
+        }
+        List<TimezoneService.TimeRange> busy = googleBusyWindows(userId, request);
+        return busy.isEmpty() ? appWindows : subtractBusy(appWindows, busy);
+    }
+
+    private List<TimezoneService.TimeRange> googleBusyWindows(UUID userId, SchedulingRequest request) {
+        OffsetDateTime from = OffsetDateTime.of(request.dateFrom().minusDays(1).atStartOfDay(), ZoneOffset.UTC);
+        OffsetDateTime to = OffsetDateTime.of(request.dateTo().plusDays(2).atStartOfDay(), ZoneOffset.UTC);
+        return calendarBusyTimeService.busyIntervals(userId, from, to).stream()
+                .map(b -> new TimezoneService.TimeRange(b.start().toInstant(), b.end().toInstant()))
+                .toList();
+    }
+
+    /** Subtracts busy intervals from a sorted, internally non-overlapping window list. */
+    private List<TimezoneService.TimeRange> subtractBusy(List<TimezoneService.TimeRange> windows,
+                                                           List<TimezoneService.TimeRange> busy) {
+        List<TimezoneService.TimeRange> result = new ArrayList<>();
+        for (TimezoneService.TimeRange window : windows) {
+            List<TimezoneService.TimeRange> pieces = List.of(window);
+            for (TimezoneService.TimeRange busyRange : busy) {
+                List<TimezoneService.TimeRange> next = new ArrayList<>();
+                for (TimezoneService.TimeRange piece : pieces) {
+                    next.addAll(subtractOne(piece, busyRange));
+                }
+                pieces = next;
+            }
+            result.addAll(pieces);
+        }
+        return result;
+    }
+
+    /** {@code window} minus {@code busy}: 0, 1, or 2 resulting pieces depending on overlap. */
+    private List<TimezoneService.TimeRange> subtractOne(TimezoneService.TimeRange window, TimezoneService.TimeRange busy) {
+        Instant overlapStart = window.start().isAfter(busy.start()) ? window.start() : busy.start();
+        Instant overlapEnd = window.end().isBefore(busy.end()) ? window.end() : busy.end();
+        if (!overlapStart.isBefore(overlapEnd)) {
+            return List.of(window);
+        }
+        List<TimezoneService.TimeRange> pieces = new ArrayList<>();
+        if (overlapStart.isAfter(window.start())) {
+            pieces.add(new TimezoneService.TimeRange(window.start(), overlapStart));
+        }
+        if (overlapEnd.isBefore(window.end())) {
+            pieces.add(new TimezoneService.TimeRange(overlapEnd, window.end()));
+        }
+        return pieces;
     }
 
     /** Pairwise intersection of two sorted, internally non-overlapping interval lists. */

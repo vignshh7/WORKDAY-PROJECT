@@ -56,7 +56,13 @@ class SingleCalendarEventReconciler {
             return;
         }
 
-        CalendarEventSnapshot snapshot = calendarProvider.getEvent(event.getExternalEventId());
+        UUID ownerId = event.getCalendarOwnerUser() == null ? null : event.getCalendarOwnerUser().getId();
+        if (ownerId == null) {
+            // No recorded owner (e.g. a NoOp-provider event, or one created before the per-user
+            // OAuth revision) - nothing to reconcile against.
+            return;
+        }
+        CalendarEventSnapshot snapshot = calendarProvider.getEvent(event.getExternalEventId(), ownerId);
 
         if (!snapshot.exists()) {
             triggerReschedule(round, "Calendar event was deleted externally");

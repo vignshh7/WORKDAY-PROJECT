@@ -23,17 +23,21 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Drives the Google OAuth2 authorization-code flow that connects one Google account's calendar
- * to this backend (see {@link GoogleOAuthToken} for why it's one org-wide connection, not one
- * per user). {@link GoogleOAuthTokenService} owns what happens to the tokens once obtained;
- * this class only owns the authorize/callback handshake.
+ * Drives the Google OAuth2 authorization-code flow that connects one user's own Google Calendar
+ * to this backend - every candidate and interviewer (or any other user) connects their own
+ * (see {@link GoogleOAuthToken} for why it's per-user, not one shared org-wide connection as in
+ * Phase 20's original design). {@link GoogleOAuthTokenService} owns what happens to the tokens
+ * once obtained; this class only owns the authorize/callback handshake.
  */
 @Service
 @RequiredArgsConstructor
 public class GoogleOAuthService {
 
     private static final Logger log = LoggerFactory.getLogger(GoogleOAuthService.class);
-    private static final String SCOPE = "https://www.googleapis.com/auth/calendar.events";
+    /** Full calendar scope, not just calendar.events - freebusy.query (used to fetch a
+     *  candidate's/interviewer's busy times during scheduling) needs read access to the whole
+     *  calendar, which the narrower calendar.events scope does not grant. */
+    private static final String SCOPE = "https://www.googleapis.com/auth/calendar";
     private static final long STATE_TTL_MINUTES = 10;
 
     @Value("${GOOGLE_CLIENT_ID:}")

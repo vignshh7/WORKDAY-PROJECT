@@ -1,6 +1,7 @@
 package com.interviewscheduler.integration;
 
 import com.interviewscheduler.interview.InterviewRound;
+import com.interviewscheduler.user.User;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
@@ -26,7 +27,7 @@ import java.util.UUID;
 @Getter
 @Setter
 @NoArgsConstructor
-@ToString(exclude = "interviewRound")
+@ToString(exclude = {"interviewRound", "calendarOwnerUser"})
 @EqualsAndHashCode(of = "id")
 public class CalendarEvent {
 
@@ -56,4 +57,10 @@ public class CalendarEvent {
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 20)
     private CalendarEventStatus status = CalendarEventStatus.PENDING;
+
+    /** Whose Google Calendar this event lives on (Phase 20 per-user OAuth revision) - see V23
+     *  migration javadoc for why this is recorded here rather than re-derived from participants. */
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "calendar_owner_user_id")
+    private User calendarOwnerUser;
 }

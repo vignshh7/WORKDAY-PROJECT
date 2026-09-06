@@ -5,6 +5,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.UUID;
 
@@ -37,8 +38,8 @@ public class NoOpCalendarProvider implements CalendarProvider {
     }
 
     @Override
-    public void cancelEvent(String externalEventId) {
-        log.info("[NOOP] cancelEvent externalId={}", externalEventId);
+    public void cancelEvent(String externalEventId, UUID calendarOwnerUserId) {
+        log.info("[NOOP] cancelEvent externalId={} ownerUserId={}", externalEventId, calendarOwnerUserId);
     }
 
     /**
@@ -48,9 +49,16 @@ public class NoOpCalendarProvider implements CalendarProvider {
      * recorded time.
      */
     @Override
-    public CalendarEventSnapshot getEvent(String externalEventId) {
-        log.debug("[NOOP] getEvent externalId={}", externalEventId);
+    public CalendarEventSnapshot getEvent(String externalEventId, UUID calendarOwnerUserId) {
+        log.debug("[NOOP] getEvent externalId={} ownerUserId={}", externalEventId, calendarOwnerUserId);
         return new CalendarEventSnapshot(true, null, null, List.of());
+    }
+
+    /** No external calendar to be busy on, so this user is never reported busy. */
+    @Override
+    public List<BusyInterval> getBusyIntervals(UUID userId, OffsetDateTime start, OffsetDateTime end) {
+        log.debug("[NOOP] getBusyIntervals userId={} start={} end={}", userId, start, end);
+        return List.of();
     }
 
     @Override

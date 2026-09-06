@@ -20,10 +20,13 @@ import java.util.Optional;
 import java.util.UUID;
 
 /**
- * Persists and refreshes the single org-wide Google Calendar OAuth connection (see
- * {@link GoogleOAuthToken}). {@link GoogleCalendarProvider} calls {@link #getValidAccessToken()}
- * before every API call rather than trusting a cached token's expiry blindly - refresh happens
- * here, transparently, so the provider layer never has to think about token lifecycle.
+ * Persists and refreshes each user's own Google Calendar OAuth connection (see
+ * {@link GoogleOAuthToken} - one row per user_id, not a single org-wide connection). Every
+ * {@link GoogleCalendarProvider} call is scoped to a specific user's token (whose calendar is
+ * being read or written), so every method here takes a {@code userId}.
+ * {@link #getValidAccessToken} is called before every provider API call rather than trusting a
+ * cached token's expiry blindly - refresh happens here, transparently, so the provider layer
+ * never has to think about token lifecycle.
  */
 @Service
 @RequiredArgsConstructor
@@ -44,10 +47,11 @@ public class GoogleOAuthTokenService {
     private final UserRepository userRepository;
 
     /**
-     * Returns a currently-valid access token, refreshing the stored one first if it is expired
-     * or about to expire. Throws {@link CalendarIntegrationException} if Google Calendar has
-     * never been connected, or if the refresh call itself fails (e.g. the refresh token was
-     * revoked - the connection then needs to be re-authorized via {@link GoogleOAuthService}).
+     * Returns a currently-valid access token for the given user, refreshing the stored one first
+     * if it is expired or about to expire. Throws {@link CalendarIntegrationException} if this
+     * user has never connected Google Calendar, or if the refresh call itself fails (e.g. the
+     * refresh token was revoked - the connection then needs to be re-authorized via
+     * {@link GoogleOAuthService}).
      *
      * <p><b>{@code REQUIRES_NEW}, not the default {@code REQUIRED}:</b> {@link GoogleCalendarProvider}
      * calls this from inside whatever larger transaction is booking/rescheduling/cancelling an
@@ -64,11 +68,11 @@ public class GoogleOAuthTokenService {
      * mode already does. (Caught live in Phase 20 verification, not a hypothetical.)
      */
     @Transactional(propagation = Propagation.REQUIRES_NEW)
-    public String getValidAccessToken() {
-        GoogleOAuthToken token = tokenRepository.findTopByOrderByUpdatedAtDesc()
+    public String getValidAccessToken(UUID userId) {
+        GoogleOAuthToken token = tokenRepository.findByUserId(userId)
                 .orElseThrow(() -> new CalendarIntegrationException(
-                        "Google Calendar is not connected. An admin must authorize it first "
-                        + "via GET /api/integrations/google-calendar/authorize."));
+                        "This user has not connected Google Calendar. Connect it first via "
+                        + "GET /api/integrations/google-calendar/authorize."));
 
         if (token.getExpiresAt().isBefore(OffsetDateTime.now().plusSeconds(EXPIRY_SAFETY_MARGIN_SECONDS))) {
             refresh(token);
@@ -77,18 +81,18 @@ public class GoogleOAuthTokenService {
     }
 
     /**
-     * Unconditionally refreshes the access token, regardless of its recorded expiry. Used by
-     * {@link GoogleCalendarProvider} as the one-retry-after-401 step in its documented error
-     * contract, for the case where Google invalidated the token before our recorded expiry
-     * (e.g. the connected account's access was revoked and later re-granted). Same
-     * {@code REQUIRES_NEW} reasoning as {@link #getValidAccessToken()}.
+     * Unconditionally refreshes the given user's access token, regardless of its recorded
+     * expiry. Used by {@link GoogleCalendarProvider} as the one-retry-after-401 step in its
+     * documented error contract, for the case where Google invalidated the token before our
+     * recorded expiry (e.g. the connected account's access was revoked and later re-granted).
+     * Same {@code REQUIRES_NEW} reasoning as {@link #getValidAccessToken}.
      */
     @Transactional(propagation = Propagation.REQUIRES_NEW)
-    public String forceRefreshAccessToken() {
-        GoogleOAuthToken token = tokenRepository.findTopByOrderByUpdatedAtDesc()
+    public String forceRefreshAccessToken(UUID userId) {
+        GoogleOAuthToken token = tokenRepository.findByUserId(userId)
                 .orElseThrow(() -> new CalendarIntegrationException(
-                        "Google Calendar is not connected. An admin must authorize it first "
-                        + "via GET /api/integrations/google-calendar/authorize."));
+                        "This user has not connected Google Calendar. Connect it first via "
+                        + "GET /api/integrations/google-calendar/authorize."));
         refresh(token);
         return token.getAccessToken();
     }
@@ -105,7 +109,8 @@ public class GoogleOAuthTokenService {
                 token.setRefreshToken(response.getRefreshToken());
             }
             tokenRepository.save(token);
-            log.debug("Refreshed Google Calendar OAuth access token, new expiry={}", token.getExpiresAt());
+            log.debug("Refreshed Google Calendar OAuth access token for userId={}, new expiry={}",
+                    token.getUser().getId(), token.getExpiresAt());
         } catch (IOException e) {
             throw new CalendarIntegrationException(
                     "Failed to refresh Google Calendar access token - the connection may need "
@@ -113,13 +118,13 @@ public class GoogleOAuthTokenService {
         }
     }
 
-    /** Upserts the single stored connection row - see {@link GoogleOAuthToken} javadoc. */
+    /** Upserts this user's stored connection row - see {@link GoogleOAuthToken} javadoc. */
     @Transactional
-    public GoogleOAuthToken saveTokens(GoogleTokenResponse tokenResponse, UUID connectedByUserId) {
-        Optional<GoogleOAuthToken> existing = tokenRepository.findTopByOrderByUpdatedAtDesc();
+    public GoogleOAuthToken saveTokens(GoogleTokenResponse tokenResponse, UUID userId) {
+        Optional<GoogleOAuthToken> existing = tokenRepository.findByUserId(userId);
         if (tokenResponse.getRefreshToken() == null && existing.isEmpty()) {
             throw new CalendarIntegrationException(
-                    "Google did not return a refresh token and no prior connection exists. "
+                    "Google did not return a refresh token and no prior connection exists for this user. "
                     + "Revoke the app's access at https://myaccount.google.com/permissions "
                     + "and re-authorize so Google issues a fresh refresh token.");
         }
@@ -131,12 +136,12 @@ public class GoogleOAuthTokenService {
         }
         token.setExpiresAt(OffsetDateTime.now().plusSeconds(tokenResponse.getExpiresInSeconds()));
         token.setScope(tokenResponse.getScope());
-        token.setConnectedByUser(userRepository.getReferenceById(connectedByUserId));
+        token.setUser(userRepository.getReferenceById(userId));
         return tokenRepository.save(token);
     }
 
     @Transactional(readOnly = true)
-    public Optional<GoogleOAuthToken> currentConnection() {
-        return tokenRepository.findTopByOrderByUpdatedAtDesc();
+    public Optional<GoogleOAuthToken> currentConnection(UUID userId) {
+        return tokenRepository.findByUserId(userId);
     }
 }

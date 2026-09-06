@@ -13,6 +13,11 @@ import com.google.api.services.calendar.model.EntryPoint;
 import com.google.api.services.calendar.model.Event;
 import com.google.api.services.calendar.model.EventAttendee;
 import com.google.api.services.calendar.model.EventDateTime;
+import com.google.api.services.calendar.model.FreeBusyCalendar;
+import com.google.api.services.calendar.model.FreeBusyRequest;
+import com.google.api.services.calendar.model.FreeBusyRequestItem;
+import com.google.api.services.calendar.model.FreeBusyResponse;
+import com.google.api.services.calendar.model.TimePeriod;
 import com.interviewscheduler.common.exception.CalendarIntegrationException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -27,11 +32,15 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * Google Calendar provider — active when {@code calendar.provider=google}. Every event is
- * created on the "primary" calendar of whichever single Google account was connected via
- * {@link GoogleOAuthService} (see {@link GoogleOAuthToken} for why this is one org-wide
- * connection, not one per user) — attendees are invited by email address, they don't need
- * their own OAuth connection.
+ * Google Calendar provider — active when {@code calendar.provider=google}. Connections are
+ * per-user (see {@link GoogleOAuthToken}): every method here is scoped to a specific user's own
+ * "primary" calendar, using that user's own OAuth token — not one shared org-wide account.
+ * Interview events are created on the assigned interviewer's calendar (see
+ * {@link CalendarSyncService}); every other participant is invited by email address and doesn't
+ * need their own connection just to receive an invite. A candidate's or interviewer's own
+ * connection is used for {@link #getBusyIntervals} during slot finding, and for
+ * {@link #createEvent}/{@link #updateEvent}/{@link #cancelEvent}/{@link #getEvent} whenever
+ * that user is the calendar owner of record.
  *
  * <p>{@code sendUpdates("none")} is used on every write: this system already has its own
  * {@code NotificationService} (Phase 22) as the single source of truth for who was told what
@@ -74,39 +83,41 @@ public class GoogleCalendarProvider implements CalendarProvider {
 
     @Override
     public ExternalEventResult createEvent(CalendarEventRequest request) {
-        log.debug("[GOOGLE] createEvent roundId={} start={} end={} attendees={}",
-                request.roundId(), request.start(), request.end(), request.attendeeEmails());
+        log.debug("[GOOGLE] createEvent roundId={} ownerUserId={} start={} end={} attendees={}",
+                request.roundId(), request.calendarOwnerUserId(), request.start(), request.end(), request.attendeeEmails());
         Event event = toGoogleEvent(request);
         event.setConferenceData(new ConferenceData().setCreateRequest(
                 new CreateConferenceRequest()
                         .setRequestId(UUID.randomUUID().toString())
                         .setConferenceSolutionKey(new ConferenceSolutionKey().setType("hangoutsMeet"))));
 
-        Event created = executeWithRetry(token -> client(token).events().insert(CALENDAR_ID, event)
-                .setConferenceDataVersion(1)
-                .setSendUpdates("none")
-                .execute(), "createEvent");
+        Event created = executeWithRetry(request.calendarOwnerUserId(),
+                token -> client(token).events().insert(CALENDAR_ID, event)
+                        .setConferenceDataVersion(1)
+                        .setSendUpdates("none")
+                        .execute(), "createEvent");
         return new ExternalEventResult(created.getId(), extractMeetingLink(created));
     }
 
     @Override
     public ExternalEventResult updateEvent(String externalEventId, CalendarEventRequest request) {
-        log.debug("[GOOGLE] updateEvent externalId={} roundId={} start={} end={}",
-                externalEventId, request.roundId(), request.start(), request.end());
+        log.debug("[GOOGLE] updateEvent externalId={} ownerUserId={} roundId={} start={} end={}",
+                externalEventId, request.calendarOwnerUserId(), request.roundId(), request.start(), request.end());
         Event patch = toGoogleEvent(request);
 
-        Event updated = executeWithRetry(token -> client(token).events().patch(CALENDAR_ID, externalEventId, patch)
-                .setConferenceDataVersion(1)
-                .setSendUpdates("none")
-                .execute(), "updateEvent");
+        Event updated = executeWithRetry(request.calendarOwnerUserId(),
+                token -> client(token).events().patch(CALENDAR_ID, externalEventId, patch)
+                        .setConferenceDataVersion(1)
+                        .setSendUpdates("none")
+                        .execute(), "updateEvent");
         return new ExternalEventResult(updated.getId(), extractMeetingLink(updated));
     }
 
     @Override
-    public void cancelEvent(String externalEventId) {
-        log.debug("[GOOGLE] cancelEvent externalId={}", externalEventId);
+    public void cancelEvent(String externalEventId, UUID calendarOwnerUserId) {
+        log.debug("[GOOGLE] cancelEvent externalId={} ownerUserId={}", externalEventId, calendarOwnerUserId);
         try {
-            executeWithRetry(token -> {
+            executeWithRetry(calendarOwnerUserId, token -> {
                 client(token).events().delete(CALENDAR_ID, externalEventId).setSendUpdates("none").execute();
                 return null;
             }, "cancelEvent");
@@ -121,11 +132,11 @@ public class GoogleCalendarProvider implements CalendarProvider {
     }
 
     @Override
-    public CalendarEventSnapshot getEvent(String externalEventId) {
-        log.debug("[GOOGLE] getEvent externalId={}", externalEventId);
+    public CalendarEventSnapshot getEvent(String externalEventId, UUID calendarOwnerUserId) {
+        log.debug("[GOOGLE] getEvent externalId={} ownerUserId={}", externalEventId, calendarOwnerUserId);
         try {
-            Event event = executeWithRetry(token -> client(token).events().get(CALENDAR_ID, externalEventId).execute(),
-                    "getEvent");
+            Event event = executeWithRetry(calendarOwnerUserId,
+                    token -> client(token).events().get(CALENDAR_ID, externalEventId).execute(), "getEvent");
             List<String> declined = event.getAttendees() == null ? List.of()
                     : event.getAttendees().stream()
                             .filter(a -> "declined".equals(a.getResponseStatus()))
@@ -142,12 +153,36 @@ public class GoogleCalendarProvider implements CalendarProvider {
     }
 
     @Override
+    public List<BusyInterval> getBusyIntervals(UUID userId, OffsetDateTime start, OffsetDateTime end) {
+        log.debug("[GOOGLE] getBusyIntervals userId={} start={} end={}", userId, start, end);
+        FreeBusyRequest requestBody = new FreeBusyRequest()
+                .setTimeMin(new DateTime(start.toInstant().toEpochMilli()))
+                .setTimeMax(new DateTime(end.toInstant().toEpochMilli()))
+                .setItems(List.of(new FreeBusyRequestItem().setId(CALENDAR_ID)));
+
+        FreeBusyResponse response = executeWithRetry(userId,
+                token -> client(token).freebusy().query(requestBody).execute(), "getBusyIntervals");
+
+        Object rawCalendar = response.getCalendars() == null ? null : response.getCalendars().get(CALENDAR_ID);
+        FreeBusyCalendar calendar = rawCalendar instanceof FreeBusyCalendar fb ? fb : null;
+        if (calendar == null || calendar.getBusy() == null) {
+            return List.of();
+        }
+        return calendar.getBusy().stream()
+                .map(period -> new BusyInterval(toOffsetDateTime(period.getStart()), toOffsetDateTime(period.getEnd())))
+                .toList();
+    }
+
+    @Override
     public String providerName() {
         return "GOOGLE";
     }
 
     private OffsetDateTime toOffsetDateTime(EventDateTime eventDateTime) {
-        DateTime dateTime = eventDateTime == null ? null : eventDateTime.getDateTime();
+        return eventDateTime == null ? null : toOffsetDateTime(eventDateTime.getDateTime());
+    }
+
+    private OffsetDateTime toOffsetDateTime(DateTime dateTime) {
         if (dateTime == null) {
             return null;
         }
@@ -201,16 +236,24 @@ public class GoogleCalendarProvider implements CalendarProvider {
         T call(String accessToken) throws IOException;
     }
 
-    /** Runs a Google API call; on a 401 refreshes the token once and retries exactly once. */
-    private <T> T executeWithRetry(GoogleApiCall<T> call, String operationName) {
-        String accessToken = oauthTokenService.getValidAccessToken();
+    /**
+     * Runs a Google API call as {@code userId}; on a 401 refreshes that user's token once and
+     * retries exactly once.
+     */
+    private <T> T executeWithRetry(UUID userId, GoogleApiCall<T> call, String operationName) {
+        if (userId == null) {
+            throw new CalendarIntegrationException(
+                    "No calendar owner user recorded for this operation (" + operationName
+                    + ") - cannot determine whose Google account to use.");
+        }
+        String accessToken = oauthTokenService.getValidAccessToken(userId);
         try {
             return call.call(accessToken);
         } catch (GoogleJsonResponseException e) {
             if (e.getStatusCode() == 401) {
-                log.warn("[GOOGLE] {} got 401 despite a fresh token — forcing refresh and retrying once",
-                        operationName);
-                String refreshedToken = oauthTokenService.forceRefreshAccessToken();
+                log.warn("[GOOGLE] {} got 401 despite a fresh token (userId={}) — forcing refresh and retrying once",
+                        operationName, userId);
+                String refreshedToken = oauthTokenService.forceRefreshAccessToken(userId);
                 try {
                     return call.call(refreshedToken);
                 } catch (IOException retryEx) {

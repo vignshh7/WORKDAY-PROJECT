@@ -7,5 +7,5 @@ import java.util.UUID;
 
 public interface GoogleOAuthTokenRepository extends JpaRepository<GoogleOAuthToken, UUID> {
 
-    Optional<GoogleOAuthToken> findTopByOrderByUpdatedAtDesc();
+    Optional<GoogleOAuthToken> findByUserId(UUID userId);
 }
