@@ -69,6 +69,23 @@ public class JobService {
         return JobResponse.from(jobRepository.saveAndFlush(job));
     }
 
+    /**
+     * Phase 18 — explicit job closure. Sets status CLOSED without touching any existing
+     * interview data (processes/rounds/calendar events continue unchanged). New processes
+     * for a CLOSED job are blocked in {@link com.interviewscheduler.interview.InterviewProcessService}.
+     */
+    @Transactional
+    public JobResponse close(UUID id) {
+        Job job = getOrThrow(id);
+        if (job.getStatus() == JobStatus.CLOSED) {
+            throw new ConflictException("Job is already CLOSED");
+        }
+        job.setStatus(JobStatus.CLOSED);
+        Job saved = jobRepository.saveAndFlush(job);
+        auditService.logForCurrentUser(AuditAction.JOB_CLOSED, "JOB", saved.getId(), null);
+        return JobResponse.from(saved);
+    }
+
     @Transactional
     public void delete(UUID id) {
         Job job = getOrThrow(id);

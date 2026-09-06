@@ -53,6 +53,17 @@ public class JobController {
         return ResponseEntity.noContent().build();
     }
 
+    /**
+     * Phase 18: explicitly close a job. Sets status CLOSED without touching existing
+     * interview data — active processes and scheduled interviews continue unchanged.
+     * New processes cannot be started for a CLOSED job.
+     */
+    @PostMapping("/{id}/close")
+    @PreAuthorize("hasAnyRole('RECRUITER', 'ADMIN')")
+    public JobResponse close(@PathVariable UUID id) {
+        return jobService.close(id);
+    }
+
     @GetMapping("/{id}/skills")
     public List<JobSkillResponse> getSkills(@PathVariable UUID id) {
         return jobService.getSkills(id);

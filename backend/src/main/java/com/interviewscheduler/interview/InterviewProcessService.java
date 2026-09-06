@@ -10,11 +10,21 @@ import com.interviewscheduler.common.exception.DuplicateResourceException;
 import com.interviewscheduler.common.exception.ForbiddenException;
 import com.interviewscheduler.common.exception.InvalidStateTransitionException;
 import com.interviewscheduler.common.exception.ResourceNotFoundException;
+import com.interviewscheduler.integration.CalendarEvent;
+import com.interviewscheduler.integration.CalendarEventRepository;
+import com.interviewscheduler.integration.CalendarEventStatus;
 import com.interviewscheduler.job.Job;
 import com.interviewscheduler.job.JobRepository;
+import com.interviewscheduler.job.JobStatus;
+import com.interviewscheduler.notification.Notification;
+import com.interviewscheduler.notification.NotificationChannel;
+import com.interviewscheduler.notification.NotificationRepository;
+import com.interviewscheduler.notification.NotificationStatus;
+import com.interviewscheduler.notification.NotificationType;
 import com.interviewscheduler.security.SecurityUtils;
 import com.interviewscheduler.security.UserPrincipal;
 import com.interviewscheduler.user.Role;
+import com.interviewscheduler.user.User;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -32,8 +42,11 @@ public class InterviewProcessService {
 
     private final InterviewProcessRepository interviewProcessRepository;
     private final InterviewRoundRepository interviewRoundRepository;
+    private final InterviewParticipantRepository interviewParticipantRepository;
     private final CandidateRepository candidateRepository;
     private final JobRepository jobRepository;
+    private final CalendarEventRepository calendarEventRepository;
+    private final NotificationRepository notificationRepository;
     private final AuditService auditService;
 
     /**
@@ -49,6 +62,9 @@ public class InterviewProcessService {
                 .orElseThrow(() -> new ResourceNotFoundException("No candidate with id: " + request.candidateId()));
         Job job = jobRepository.findById(request.jobId())
                 .orElseThrow(() -> new ResourceNotFoundException("No job with id: " + request.jobId()));
+        if (job.getStatus() == JobStatus.CLOSED) {
+            throw new ConflictException("Cannot start a process for a closed job");
+        }
 
         if (candidate.getCurrentStatus() == CandidateStatus.REJECTED
                 || candidate.getCurrentStatus() == CandidateStatus.WITHDRAWN) {
@@ -193,8 +209,40 @@ public class InterviewProcessService {
                 .filter(r -> r.getRoundNumber() > failedRound.getRoundNumber())
                 .filter(r -> r.getStatus() != RoundStatus.COMPLETED && r.getStatus() != RoundStatus.CANCELLED)
                 .toList();
-        futureRounds.forEach(r -> r.setStatus(RoundStatus.CANCELLED));
-        interviewRoundRepository.saveAll(futureRounds);
+
+        for (InterviewRound round : futureRounds) {
+            cancelRoundCascade(round, NotificationType.INTERVIEW_CANCELLED);
+        }
+    }
+
+    /** Cancels a round's calendar events, removes participants, notifies, and marks the round CANCELLED. */
+    void cancelRoundCascade(InterviewRound round, NotificationType notificationType) {
+        for (CalendarEvent event : calendarEventRepository.findByInterviewRoundId(round.getId())) {
+            if (event.getStatus() != CalendarEventStatus.CANCELLED) {
+                event.setStatus(CalendarEventStatus.CANCELLED);
+                calendarEventRepository.save(event);
+            }
+        }
+        List<InterviewParticipant> participants = interviewParticipantRepository.findByInterviewRoundId(round.getId());
+        for (InterviewParticipant p : participants) {
+            if (p.getStatus() != ParticipantStatus.REMOVED) {
+                p.setStatus(ParticipantStatus.REMOVED);
+                interviewParticipantRepository.save(p);
+            }
+        }
+        participants.stream().map(InterviewParticipant::getUser).distinct().forEach(user -> {
+            Notification n = new Notification();
+            n.setUser(user); n.setInterviewRound(round);
+            n.setType(notificationType); n.setChannel(NotificationChannel.IN_APP);
+            n.setStatus(NotificationStatus.PENDING);
+            notificationRepository.save(n);
+        });
+        round.setScheduledStart(null);
+        round.setScheduledEnd(null);
+        round.setStatus(RoundStatus.CANCELLED);
+        interviewRoundRepository.save(round);
+        auditService.logForCurrentUser(AuditAction.INTERVIEW_CANCELLED, "INTERVIEW_ROUND", round.getId(),
+                Map.of("reason", "pipeline-invalidation"));
     }
 
     private static CandidateStatus toCandidateStatus(RoundType roundType) {

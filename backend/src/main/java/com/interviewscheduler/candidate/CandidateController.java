@@ -2,6 +2,7 @@ package com.interviewscheduler.candidate;
 
 import com.interviewscheduler.interview.InterviewProcessResponse;
 import com.interviewscheduler.interview.InterviewProcessService;
+import com.interviewscheduler.interview.PipelineConsistencyService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
@@ -25,6 +26,7 @@ public class CandidateController {
 
     private final CandidateService candidateService;
     private final InterviewProcessService interviewProcessService;
+    private final PipelineConsistencyService pipelineConsistencyService;
 
     @PostMapping
     @PreAuthorize("hasAnyRole('RECRUITER', 'ADMIN')")
@@ -71,5 +73,15 @@ public class CandidateController {
     @GetMapping("/{id}/interview-process")
     public InterviewProcessResponse getInterviewProcess(@PathVariable UUID id) {
         return interviewProcessService.findActiveByCandidate(id);
+    }
+
+    /**
+     * Phase 18: candidate (or RECRUITER/ADMIN) withdraws a candidate from the pipeline.
+     * Cancels all non-terminal rounds, calendar events, and sets candidate → WITHDRAWN.
+     */
+    @PostMapping("/{id}/withdraw")
+    public ResponseEntity<Void> withdraw(@PathVariable UUID id) {
+        pipelineConsistencyService.withdraw(id);
+        return ResponseEntity.noContent().build();
     }
 }
