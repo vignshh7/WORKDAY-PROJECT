@@ -7,6 +7,7 @@ import com.interviewscheduler.scheduling.InterviewBookingService;
 import com.interviewscheduler.scheduling.InterviewerReplacementService;
 import com.interviewscheduler.scheduling.SchedulingResponse;
 import com.interviewscheduler.scheduling.SwitchInterviewerRequest;
+import com.interviewscheduler.interview.ParticipantDeclineService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -33,6 +34,7 @@ public class InterviewController {
     private final InterviewReschedulingService interviewReschedulingService;
     private final InterviewerCancellationService interviewerCancellationService;
     private final InterviewerReplacementService interviewerReplacementService;
+    private final ParticipantDeclineService participantDeclineService;
 
     @PostMapping("/{id}/book")
     @PreAuthorize("hasAnyRole('RECRUITER', 'ADMIN')")
@@ -96,5 +98,26 @@ public class InterviewController {
     public BookingResponse switchInterviewer(@PathVariable UUID id,
                                               @Valid @RequestBody SwitchInterviewerRequest request) {
         return interviewerReplacementService.switchInterviewer(id, request);
+    }
+
+    /**
+     * Phase 17: interviewer formally declines their assignment. For SCHEDULED rounds the round
+     * moves to RESCHEDULE_REQUIRED and replacement slots are returned. For PENDING rounds the
+     * participant is marked DECLINED with no automatic rescheduling.
+     */
+    @PostMapping("/{id}/decline")
+    @PreAuthorize("hasRole('INTERVIEWER')")
+    public SchedulingResponse decline(@PathVariable UUID id) {
+        return participantDeclineService.declineByInterviewer(id);
+    }
+
+    /**
+     * Phase 17: candidate cancels their round. Round → CANCELLED, candidate stage unchanged,
+     * no pipeline progression, no automatic reschedule. Rejected if interview is IN_PROGRESS.
+     */
+    @PostMapping("/{id}/candidate-cancel")
+    @PreAuthorize("hasRole('CANDIDATE')")
+    public InterviewRoundResponse candidateCancel(@PathVariable UUID id) {
+        return participantDeclineService.cancelByCandidate(id);
     }
 }
