@@ -17,6 +17,8 @@ import com.interviewscheduler.interviewer.InterviewerMatchingService;
 import com.interviewscheduler.user.User;
 import com.interviewscheduler.user.UserRepository;
 import lombok.RequiredArgsConstructor;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -33,8 +35,14 @@ import java.time.ZonedDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * Deterministic feasibility search (spec steps 1-18). No AI, no ranking (step 19 is
@@ -43,6 +51,8 @@ import java.util.UUID;
 @Service
 @RequiredArgsConstructor
 public class SlotFinderService {
+
+    private static final Logger PERF_LOG = LoggerFactory.getLogger("PERF." + SlotFinderService.class.getName());
 
     /** Candidate start times are tried at this stride within a common availability window. */
     private static final long STEP_MINUTES = 30;
@@ -83,21 +93,33 @@ public class SlotFinderService {
             return SchedulingResponse.empty(SchedulingReasonCode.NO_QUALIFIED_INTERVIEWER);
         }
 
-        List<TimezoneService.TimeRange> candidateWindows =
-                availableWindowsFor(candidate.getUser().getId(), request);
-        if (candidateWindows.isEmpty()) {
-            return SchedulingResponse.empty(SchedulingReasonCode.NO_CANDIDATE_AVAILABILITY);
-        }
-
         List<UUID> requiredParticipantIds = request.requiredParticipantIds() == null
                 ? List.of() : request.requiredParticipantIds();
         List<CheckConflictsRequest.RequiredParticipant> requiredParticipants = requiredParticipantIds.stream()
                 .map(participantRoleResolver::resolve)
                 .toList();
 
+        // Every participant's window is independent of every other's, and for a Google-connected
+        // user it costs a blocking freebusy HTTP call (GoogleOAuthTokenService's REQUIRES_NEW
+        // transactions make each of these calls self-contained, so running them concurrently
+        // instead of one after another is safe). Sequentially, a handful of connected
+        // interviewers pushed this well past a minute; in parallel it's bounded by the slowest
+        // single call instead of their sum.
+        UUID candidateUserId = candidate.getUser().getId();
+        long t0 = System.currentTimeMillis();
+        Map<UUID, List<TimezoneService.TimeRange>> windowsByUserId =
+                fetchWindowsConcurrently(candidateUserId, requiredParticipantIds, eligibleInterviewers, request);
+        PERF_LOG.info("fetchWindowsConcurrently took {}ms for {} participants",
+                System.currentTimeMillis() - t0, windowsByUserId.size());
+
+        List<TimezoneService.TimeRange> candidateWindows = windowsByUserId.get(candidateUserId);
+        if (candidateWindows.isEmpty()) {
+            return SchedulingResponse.empty(SchedulingReasonCode.NO_CANDIDATE_AVAILABILITY);
+        }
+
         List<TimezoneService.TimeRange> baseCommon = candidateWindows;
         for (UUID participantId : requiredParticipantIds) {
-            baseCommon = intersect(baseCommon, availableWindowsFor(participantId, request));
+            baseCommon = intersect(baseCommon, windowsByUserId.get(participantId));
             if (baseCommon.isEmpty()) {
                 break;
             }
@@ -114,7 +136,7 @@ public class SlotFinderService {
         List<SlotResponse> validSlots = new ArrayList<>();
 
         for (InterviewerMatchResult interviewer : eligibleInterviewers) {
-            List<TimezoneService.TimeRange> interviewerWindows = availableWindowsFor(interviewer.userId(), request);
+            List<TimezoneService.TimeRange> interviewerWindows = windowsByUserId.get(interviewer.userId());
             if (interviewerWindows.isEmpty()) {
                 continue;
             }
@@ -221,6 +243,43 @@ public class SlotFinderService {
     }
 
     /**
+     * Resolves {@link #availableWindowsFor} for the candidate, every required participant, and
+     * every eligible interviewer concurrently instead of one at a time. Runs on virtual threads
+     * (this is IO-bound waiting on Google's API, not CPU-bound) so no pool sizing is needed, and
+     * each task opens its own DB access on its own thread rather than sharing the caller's
+     * {@code @Transactional(readOnly = true)} session, which is never touched off-thread here.
+     */
+    private Map<UUID, List<TimezoneService.TimeRange>> fetchWindowsConcurrently(
+            UUID candidateUserId, List<UUID> requiredParticipantIds,
+            List<InterviewerMatchResult> eligibleInterviewers, SchedulingRequest request) {
+        Map<UUID, CompletableFuture<List<TimezoneService.TimeRange>>> futures = new LinkedHashMap<>();
+        try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            futures.put(candidateUserId,
+                    CompletableFuture.supplyAsync(() -> availableWindowsFor(candidateUserId, request), executor));
+            for (UUID participantId : requiredParticipantIds) {
+                futures.computeIfAbsent(participantId,
+                        id -> CompletableFuture.supplyAsync(() -> availableWindowsFor(id, request), executor));
+            }
+            for (InterviewerMatchResult interviewer : eligibleInterviewers) {
+                futures.computeIfAbsent(interviewer.userId(),
+                        id -> CompletableFuture.supplyAsync(() -> availableWindowsFor(id, request), executor));
+            }
+            CompletableFuture.allOf(futures.values().toArray(CompletableFuture[]::new)).join();
+        } catch (CompletionException e) {
+            // Unwrap so callers (and GlobalExceptionHandler) see the real exception type, not a
+            // CompletionException wrapper that would otherwise map to a generic 500.
+            switch (e.getCause()) {
+                case RuntimeException re -> throw re;
+                case null -> throw e;
+                default -> throw new IllegalStateException(e.getCause());
+            }
+        }
+        Map<UUID, List<TimezoneService.TimeRange>> result = new LinkedHashMap<>();
+        futures.forEach((userId, future) -> result.put(userId, future.join()));
+        return result;
+    }
+
+    /**
      * A user connected to Google Calendar gets their availability computed, not declared: the
      * organization's configured working hours (scheduling_config), expressed in that specific
      * user's own stored timezone, minus whatever their Google Calendar reports as busy in that
@@ -233,9 +292,12 @@ public class SlotFinderService {
      * of the existing common-window intersection below without any special-casing per role.
      */
     private List<TimezoneService.TimeRange> availableWindowsFor(UUID userId, SchedulingRequest request) {
+        long t0 = System.currentTimeMillis();
         if ("google".equalsIgnoreCase(activeCalendarProvider)
                 && googleOAuthTokenService.currentConnection(userId).isPresent()) {
-            return workingHoursMinusGoogleBusy(userId, request);
+            List<TimezoneService.TimeRange> result = workingHoursMinusGoogleBusy(userId, request);
+            PERF_LOG.info("availableWindowsFor(google) userId={} took {}ms", userId, System.currentTimeMillis() - t0);
+            return result;
         }
         return availabilityRepository
                 .findByUserIdAndDateBetween(userId, request.dateFrom(), request.dateTo())
