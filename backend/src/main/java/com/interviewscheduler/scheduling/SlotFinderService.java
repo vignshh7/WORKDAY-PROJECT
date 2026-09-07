@@ -63,7 +63,6 @@ public class SlotFinderService {
     private final InterviewRoundRepository interviewRoundRepository;
     private final AvailabilityRepository availabilityRepository;
     private final InterviewerMatchingService interviewerMatchingService;
-    private final ConflictDetectionService conflictDetectionService;
     private final WorkingHoursService workingHoursService;
     private final TimezoneService timezoneService;
     private final SchedulabilityGuard schedulabilityGuard;
@@ -108,7 +107,7 @@ public class SlotFinderService {
         UUID candidateUserId = candidate.getUser().getId();
         long t0 = System.currentTimeMillis();
         Map<UUID, List<TimezoneService.TimeRange>> windowsByUserId =
-                fetchWindowsConcurrently(candidateUserId, requiredParticipantIds, eligibleInterviewers, request);
+                fetchWindowsConcurrently(candidateUserId, requiredParticipantIds, eligibleInterviewers, round, request);
         PERF_LOG.info("fetchWindowsConcurrently took {}ms for {} participants",
                 System.currentTimeMillis() - t0, windowsByUserId.size());
 
@@ -129,53 +128,23 @@ public class SlotFinderService {
         Duration duration = Duration.ofMinutes(request.durationMinutes());
         ZoneId zone = ZoneId.of(request.timezone());
 
+        long t1 = System.currentTimeMillis();
+        List<PerInterviewerResult> perInterviewerResults = computeSlotsConcurrently(
+                eligibleInterviewers, windowsByUserId, baseCommon, request, config, duration, zone);
+        PERF_LOG.info("computeSlotsConcurrently took {}ms for {} interviewers",
+                System.currentTimeMillis() - t1, eligibleInterviewers.size());
+
         boolean anyInterviewerHasAvailability = false;
         boolean anyCommonWindow = false;
         boolean anyPassedDateTimeFilters = false;
         boolean anyPassedWorkingHours = false;
         List<SlotResponse> validSlots = new ArrayList<>();
-
-        for (InterviewerMatchResult interviewer : eligibleInterviewers) {
-            List<TimezoneService.TimeRange> interviewerWindows = windowsByUserId.get(interviewer.userId());
-            if (interviewerWindows.isEmpty()) {
-                continue;
-            }
-            anyInterviewerHasAvailability = true;
-
-            List<TimezoneService.TimeRange> common = intersect(baseCommon, interviewerWindows);
-            if (common.isEmpty()) {
-                continue;
-            }
-            anyCommonWindow = true;
-
-            for (TimezoneService.TimeRange window : common) {
-                for (Instant start : candidateStarts(window, duration)) {
-                    Instant end = start.plus(duration);
-                    ZonedDateTime startLocal = start.atZone(zone);
-                    ZonedDateTime endLocal = end.atZone(zone);
-
-                    if (!passesDateTimeFilters(request, config, start, startLocal, endLocal)) {
-                        continue;
-                    }
-                    anyPassedDateTimeFilters = true;
-
-                    if (!workingHoursService.isWithinWorkingHours(startLocal.toLocalTime(), endLocal.toLocalTime())) {
-                        continue;
-                    }
-                    anyPassedWorkingHours = true;
-
-                    CheckConflictsRequest conflictRequest = new CheckConflictsRequest(
-                            round.getId(), startLocal.toOffsetDateTime(), endLocal.toOffsetDateTime(),
-                            interviewer.interviewerId(), requiredParticipants);
-                    if (conflictDetectionService.checkConflicts(conflictRequest).hasConflicts()) {
-                        continue;
-                    }
-
-                    validSlots.add(new SlotResponse(interviewer.interviewerId(), interviewer.name(),
-                            startLocal.toOffsetDateTime(), endLocal.toOffsetDateTime(), request.timezone(),
-                            interviewer.score(), "Candidate, interviewer, and required participants all available"));
-                }
-            }
+        for (PerInterviewerResult result : perInterviewerResults) {
+            anyInterviewerHasAvailability |= result.hasAvailability();
+            anyCommonWindow |= result.hasCommonWindow();
+            anyPassedDateTimeFilters |= result.passedDateTimeFilters();
+            anyPassedWorkingHours |= result.passedWorkingHours();
+            validSlots.addAll(result.slots());
         }
 
         if (validSlots.isEmpty()) {
@@ -251,18 +220,18 @@ public class SlotFinderService {
      */
     private Map<UUID, List<TimezoneService.TimeRange>> fetchWindowsConcurrently(
             UUID candidateUserId, List<UUID> requiredParticipantIds,
-            List<InterviewerMatchResult> eligibleInterviewers, SchedulingRequest request) {
+            List<InterviewerMatchResult> eligibleInterviewers, InterviewRound round, SchedulingRequest request) {
         Map<UUID, CompletableFuture<List<TimezoneService.TimeRange>>> futures = new LinkedHashMap<>();
         try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
             futures.put(candidateUserId,
-                    CompletableFuture.supplyAsync(() -> availableWindowsFor(candidateUserId, request), executor));
+                    CompletableFuture.supplyAsync(() -> availableWindowsFor(candidateUserId, round, request), executor));
             for (UUID participantId : requiredParticipantIds) {
                 futures.computeIfAbsent(participantId,
-                        id -> CompletableFuture.supplyAsync(() -> availableWindowsFor(id, request), executor));
+                        id -> CompletableFuture.supplyAsync(() -> availableWindowsFor(id, round, request), executor));
             }
             for (InterviewerMatchResult interviewer : eligibleInterviewers) {
                 futures.computeIfAbsent(interviewer.userId(),
-                        id -> CompletableFuture.supplyAsync(() -> availableWindowsFor(id, request), executor));
+                        id -> CompletableFuture.supplyAsync(() -> availableWindowsFor(id, round, request), executor));
             }
             CompletableFuture.allOf(futures.values().toArray(CompletableFuture[]::new)).join();
         } catch (CompletionException e) {
@@ -279,6 +248,86 @@ public class SlotFinderService {
         return result;
     }
 
+    private record PerInterviewerResult(boolean hasAvailability, boolean hasCommonWindow,
+                                         boolean passedDateTimeFilters, boolean passedWorkingHours,
+                                         List<SlotResponse> slots) {
+    }
+
+    /**
+     * Evaluates every eligible interviewer concurrently instead of one at a time. Each
+     * interviewer's window intersection and candidate-start enumeration is completely
+     * independent of every other interviewer's. This used to also run a DB-backed {@link
+     * ConflictDetectionService#checkConflicts} per candidate start — with a wide interviewer
+     * pool that dominated even after {@link #fetchWindowsConcurrently} made the availability
+     * lookups themselves fast — but every scheduled-round conflict it checked is now already
+     * excluded from {@code windowsByUserId} up front (see {@link #existingRoundBusyWindows}),
+     * so this loop is pure in-memory interval math and the concurrency here mainly protects
+     * against a pathologically wide interviewer pool rather than DB latency.
+     */
+    private List<PerInterviewerResult> computeSlotsConcurrently(
+            List<InterviewerMatchResult> eligibleInterviewers,
+            Map<UUID, List<TimezoneService.TimeRange>> windowsByUserId,
+            List<TimezoneService.TimeRange> baseCommon,
+            SchedulingRequest request, SchedulingConfig config, Duration duration, ZoneId zone) {
+        List<CompletableFuture<PerInterviewerResult>> futures;
+        try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            futures = eligibleInterviewers.stream()
+                    .map(interviewer -> CompletableFuture.supplyAsync(
+                            () -> computeSlotsForInterviewer(interviewer, windowsByUserId.get(interviewer.userId()),
+                                    baseCommon, request, config, duration, zone),
+                            executor))
+                    .toList();
+            CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new)).join();
+        } catch (CompletionException e) {
+            switch (e.getCause()) {
+                case RuntimeException re -> throw re;
+                case null -> throw e;
+                default -> throw new IllegalStateException(e.getCause());
+            }
+        }
+        return futures.stream().map(CompletableFuture::join).toList();
+    }
+
+    private PerInterviewerResult computeSlotsForInterviewer(
+            InterviewerMatchResult interviewer, List<TimezoneService.TimeRange> interviewerWindows,
+            List<TimezoneService.TimeRange> baseCommon,
+            SchedulingRequest request, SchedulingConfig config, Duration duration, ZoneId zone) {
+        List<SlotResponse> slots = new ArrayList<>();
+        if (interviewerWindows.isEmpty()) {
+            return new PerInterviewerResult(false, false, false, false, slots);
+        }
+
+        List<TimezoneService.TimeRange> common = intersect(baseCommon, interviewerWindows);
+        if (common.isEmpty()) {
+            return new PerInterviewerResult(true, false, false, false, slots);
+        }
+
+        boolean passedDateTimeFilters = false;
+        boolean passedWorkingHours = false;
+        for (TimezoneService.TimeRange window : common) {
+            for (Instant start : candidateStarts(window, duration)) {
+                Instant end = start.plus(duration);
+                ZonedDateTime startLocal = start.atZone(zone);
+                ZonedDateTime endLocal = end.atZone(zone);
+
+                if (!passesDateTimeFilters(request, config, start, startLocal, endLocal)) {
+                    continue;
+                }
+                passedDateTimeFilters = true;
+
+                if (!workingHoursService.isWithinWorkingHours(startLocal.toLocalTime(), endLocal.toLocalTime())) {
+                    continue;
+                }
+                passedWorkingHours = true;
+
+                slots.add(new SlotResponse(interviewer.interviewerId(), interviewer.name(),
+                        startLocal.toOffsetDateTime(), endLocal.toOffsetDateTime(), request.timezone(),
+                        interviewer.score(), "Candidate, interviewer, and required participants all available"));
+            }
+        }
+        return new PerInterviewerResult(true, true, passedDateTimeFilters, passedWorkingHours, slots);
+    }
+
     /**
      * A user connected to Google Calendar gets their availability computed, not declared: the
      * organization's configured working hours (scheduling_config), expressed in that specific
@@ -290,35 +339,76 @@ public class SlotFinderService {
      * Called for the candidate, every required participant, and each eligible interviewer, so
      * "combine both with application availability... find only slots valid for both" falls out
      * of the existing common-window intersection below without any special-casing per role.
+     *
+     * <p>Either way, the result also has this user's other already-scheduled interview rounds
+     * (buffer-expanded) subtracted out — see {@link #existingRoundBusyWindows} — so the search
+     * loop never has to run a DB-backed conflict check per candidate start; a slot simply isn't
+     * offered if it would conflict.
      */
-    private List<TimezoneService.TimeRange> availableWindowsFor(UUID userId, SchedulingRequest request) {
+    private List<TimezoneService.TimeRange> availableWindowsFor(UUID userId, InterviewRound round,
+                                                                  SchedulingRequest request) {
         long t0 = System.currentTimeMillis();
-        if ("google".equalsIgnoreCase(activeCalendarProvider)
-                && googleOAuthTokenService.currentConnection(userId).isPresent()) {
-            List<TimezoneService.TimeRange> result = workingHoursMinusGoogleBusy(userId, request);
-            PERF_LOG.info("availableWindowsFor(google) userId={} took {}ms", userId, System.currentTimeMillis() - t0);
-            return result;
+        List<TimezoneService.TimeRange> base;
+        boolean google = "google".equalsIgnoreCase(activeCalendarProvider)
+                && googleOAuthTokenService.currentConnection(userId).isPresent();
+        if (google) {
+            base = workingHoursMinusGoogleBusy(userId, request);
+        } else {
+            base = availabilityRepository
+                    .findByUserIdAndDateBetween(userId, request.dateFrom(), request.dateTo())
+                    .stream()
+                    .filter(a -> a.getStatus() == AvailabilityStatus.AVAILABLE)
+                    .map(a -> timezoneService.toUtcRange(a.getDate(), a.getStartTime(), a.getEndTime(), a.getTimezone()))
+                    .sorted(Comparator.comparing(TimezoneService.TimeRange::start))
+                    .toList();
         }
-        return availabilityRepository
-                .findByUserIdAndDateBetween(userId, request.dateFrom(), request.dateTo())
-                .stream()
-                .filter(a -> a.getStatus() == AvailabilityStatus.AVAILABLE)
-                .map(a -> timezoneService.toUtcRange(a.getDate(), a.getStartTime(), a.getEndTime(), a.getTimezone()))
-                .sorted(Comparator.comparing(TimezoneService.TimeRange::start))
+        List<TimezoneService.TimeRange> existingRoundBusy = existingRoundBusyWindows(userId, round, request);
+        List<TimezoneService.TimeRange> result = existingRoundBusy.isEmpty() ? base : subtractBusy(base, existingRoundBusy);
+        if (google) {
+            PERF_LOG.info("availableWindowsFor(google) userId={} took {}ms", userId, System.currentTimeMillis() - t0);
+        }
+        return result;
+    }
+
+    /**
+     * This user's other SCHEDULED/IN_PROGRESS rounds within the search range, each expanded by
+     * {@code round}'s own buffer minutes on both sides - one query per participant instead of
+     * one per candidate start. Equivalent to what {@link ConflictDetectionService#checkConflicts}
+     * computed per slot (a raw overlap or a buffer-only touch are both a conflict either way),
+     * just computed once up front and subtracted like Google busy time instead of re-queried
+     * for every candidate start. {@code round} itself is excluded (relevant when rescheduling).
+     */
+    private List<TimezoneService.TimeRange> existingRoundBusyWindows(UUID userId, InterviewRound round,
+                                                                       SchedulingRequest request) {
+        int bufferMinutes = round.getBufferMinutes();
+        OffsetDateTime from = OffsetDateTime.of(request.dateFrom().minusDays(1).atStartOfDay(), ZoneOffset.UTC);
+        OffsetDateTime to = OffsetDateTime.of(request.dateTo().plusDays(2).atStartOfDay(), ZoneOffset.UTC);
+        return interviewRoundRepository.findScheduledOverlapsForUser(userId, from, to).stream()
+                .filter(r -> !r.getId().equals(round.getId()))
+                .map(r -> new TimezoneService.TimeRange(
+                        r.getScheduledStart().toInstant().minus(bufferMinutes, ChronoUnit.MINUTES),
+                        r.getScheduledEnd().toInstant().plus(bufferMinutes, ChronoUnit.MINUTES)))
                 .toList();
     }
 
     /** Work-hours windows (one per eligible day in the request's date range, in this user's own
-     * timezone) minus their Google Calendar busy time - see {@link #availableWindowsFor}. */
+     * timezone, using their own {@code workingStart}/{@code workingEnd} override when they've
+     * set one rather than the org-wide default) minus their Google Calendar busy time - see
+     * {@link #availableWindowsFor}. */
     private List<TimezoneService.TimeRange> workingHoursMinusGoogleBusy(UUID userId, SchedulingRequest request) {
-        String zoneId = userRepository.findById(userId).map(User::getTimezone).orElse("UTC");
+        User user = userRepository.findById(userId).orElse(null);
+        String zoneId = user != null ? user.getTimezone() : "UTC";
         SchedulingConfig config = workingHoursService.currentConfig();
+        LocalTime workingStart = user != null && user.getWorkingStart() != null
+                ? user.getWorkingStart() : config.getWorkingStart();
+        LocalTime workingEnd = user != null && user.getWorkingEnd() != null
+                ? user.getWorkingEnd() : config.getWorkingEnd();
         List<TimezoneService.TimeRange> windows = new ArrayList<>();
         for (LocalDate date = request.dateFrom(); !date.isAfter(request.dateTo()); date = date.plusDays(1)) {
             if (workingHoursService.isWeekend(date) && !config.isAllowWeekends()) {
                 continue;
             }
-            windows.add(timezoneService.toUtcRange(date, config.getWorkingStart(), config.getWorkingEnd(), zoneId));
+            windows.add(timezoneService.toUtcRange(date, workingStart, workingEnd, zoneId));
         }
         if (windows.isEmpty()) {
             return windows;
