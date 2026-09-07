@@ -273,8 +273,8 @@ All under `/api/interviews/{roundId}/...` — "an interview" here means one `int
 | Endpoint | Role | Body | Returns |
 |---|---|---|---|
 | `POST /{id}/book` | RECRUITER/ADMIN | `BookingRequest{interviewerId, start, end, timezone, idempotencyKey, additionalParticipantIds?}` | `BookingResponse{interviewRoundId, status, scheduledStart, scheduledEnd, interviewerId, calendarEventId, message}` |
-| `POST /{id}/complete` | RECRUITER/ADMIN | `CompleteRoundRequest` (empty, or omit body) | `InterviewRoundResponse` — moves SCHEDULED/IN_PROGRESS → COMPLETED |
-| `POST /{id}/result` | RECRUITER/ADMIN | `RoundResultRequest{result: PASS\|FAIL\|HOLD}` | `InterviewRoundResponse` — PASS advances the candidate (or SELECTED on the last round); FAIL rejects the candidate and cancels every future round; HOLD is a no-op on progression |
+| `POST /{id}/complete` | RECRUITER/ADMIN, or INTERVIEWER (must be the assigned one) | `CompleteRoundRequest` (empty, or omit body) | `InterviewRoundResponse` — moves SCHEDULED/IN_PROGRESS → COMPLETED |
+| `POST /{id}/result` | RECRUITER/ADMIN, or INTERVIEWER (must be the assigned one) | `RoundResultRequest{result: PASS\|FAIL\|HOLD}` | `InterviewRoundResponse` — PASS advances the candidate (or SELECTED on the last round) and clears the next round to be scheduled; FAIL rejects the candidate and cancels every future round; HOLD is a no-op on progression |
 | `POST /{id}/reschedule` | self-or-staff | `RescheduleRequest{reason?, dateFrom?, dateTo?, preferredTimeStart?, preferredTimeEnd?}` (or omit body) | `SchedulingResponse` — round → `RESCHEDULE_REQUIRED`, then re-runs find+rank immediately, returning new candidate slots |
 | `POST /{id}/cancel` | RECRUITER/ADMIN | none | `InterviewRoundResponse` — round → `CANCELLED`, no auto-reschedule |
 | `POST /{id}/interviewer-cancel` | INTERVIEWER (must be the assigned one) | none | `SchedulingResponse` — round → `RESCHEDULE_REQUIRED`, replacement search runs automatically |

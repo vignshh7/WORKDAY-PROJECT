@@ -42,15 +42,21 @@ public class InterviewController {
         return interviewBookingService.book(id, request);
     }
 
+    /** Staff may complete any round; an INTERVIEWER may only complete a round they're assigned
+     *  to — {@link InterviewProcessService#completeRound} enforces the ownership check. */
     @PostMapping("/{id}/complete")
-    @PreAuthorize("hasAnyRole('RECRUITER', 'ADMIN')")
+    @PreAuthorize("hasAnyRole('RECRUITER', 'ADMIN', 'INTERVIEWER')")
     public InterviewRoundResponse complete(@PathVariable UUID id,
                                             @RequestBody(required = false) CompleteRoundRequest request) {
         return interviewProcessService.completeRound(id);
     }
 
+    /** Staff may record a result on any round; an INTERVIEWER may only do so for a round
+     *  they're assigned to — {@link InterviewProcessService#submitResult} enforces the
+     *  ownership check. This is how an interviewer's own PASS clears the way for the
+     *  candidate's next round to be scheduled. */
     @PostMapping("/{id}/result")
-    @PreAuthorize("hasAnyRole('RECRUITER', 'ADMIN')")
+    @PreAuthorize("hasAnyRole('RECRUITER', 'ADMIN', 'INTERVIEWER')")
     public InterviewRoundResponse submitResult(@PathVariable UUID id, @Valid @RequestBody RoundResultRequest request) {
         return interviewProcessService.submitResult(id, request);
     }

@@ -115,11 +115,15 @@ public class InterviewProcessService {
         return InterviewProcessResponse.from(process);
     }
 
-    /** Marks the candidate's current round as COMPLETED (the interview took place, no result yet). */
+    /**
+     * Marks the candidate's current round as COMPLETED (the interview took place, no result
+     * yet). Callable by staff for any round, or by the interviewer actually assigned to it.
+     */
     @Transactional
     public InterviewRoundResponse completeRound(UUID roundId) {
         InterviewRound round = getRoundOrThrow(roundId);
         InterviewProcess process = round.getProcess();
+        requireStaffOrAssignedInterviewer(round);
 
         if (round.getStatus() != RoundStatus.SCHEDULED && round.getStatus() != RoundStatus.IN_PROGRESS) {
             throw new InvalidStateTransitionException(
@@ -141,12 +145,15 @@ public class InterviewProcessService {
      * Records PASS/FAIL/HOLD on an already-COMPLETED round and drives pipeline progression:
      * PASS advances to the next round (or SELECTED on the last one), FAIL rejects the
      * candidate and invalidates every future round, HOLD leaves the candidate at the same
-     * stage with no progression.
+     * stage with no progression. Callable by staff for any round, or by the interviewer
+     * actually assigned to it — this is how a PASS clears the way for the next round to be
+     * scheduled without a recruiter having to record it on the interviewer's behalf.
      */
     @Transactional
     public InterviewRoundResponse submitResult(UUID roundId, RoundResultRequest request) {
         InterviewRound round = getRoundOrThrow(roundId);
         InterviewProcess process = round.getProcess();
+        requireStaffOrAssignedInterviewer(round);
 
         if (round.getStatus() == RoundStatus.CANCELLED) {
             throw new InvalidStateTransitionException("Cannot record a result on a cancelled round");
@@ -266,6 +273,33 @@ public class InterviewProcessService {
         boolean isSelf = candidate.getUser().getId().equals(caller.getId());
         if (!isStaff && !isSelf) {
             throw new ForbiddenException("Cannot access another candidate's interview process");
+        }
+    }
+
+    /**
+     * RECRUITER/ADMIN may complete or record a result on any round. An INTERVIEWER may only do
+     * so for a round they are actually assigned to (as an active, non-declined/removed
+     * INTERVIEWER participant) — mirrors the ownership check in
+     * {@link ParticipantDeclineService#declineByInterviewer}.
+     */
+    private void requireStaffOrAssignedInterviewer(InterviewRound round) {
+        UserPrincipal caller = SecurityUtils.currentUser();
+        if (caller.getRole() == Role.RECRUITER || caller.getRole() == Role.ADMIN) {
+            return;
+        }
+        if (caller.getRole() != Role.INTERVIEWER) {
+            throw new ForbiddenException("Only staff or the assigned interviewer may do this");
+        }
+        InterviewParticipant participant = interviewParticipantRepository
+                .findByInterviewRoundIdAndUserId(round.getId(), caller.getId())
+                .orElseThrow(() -> new ForbiddenException(
+                        "You are not assigned as a participant on this interview"));
+        if (participant.getParticipantRole() != ParticipantRole.INTERVIEWER) {
+            throw new ForbiddenException("You are not assigned as an interviewer for this interview");
+        }
+        if (participant.getStatus() == ParticipantStatus.DECLINED
+                || participant.getStatus() == ParticipantStatus.REMOVED) {
+            throw new ForbiddenException("Your assignment on this interview is " + participant.getStatus());
         }
     }
 }
