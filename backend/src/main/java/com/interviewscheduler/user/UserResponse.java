@@ -1,5 +1,6 @@
 package com.interviewscheduler.user;
 
+import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.util.UUID;
 
@@ -10,6 +11,8 @@ public record UserResponse(
         Role role,
         UserStatus status,
         String timezone,
+        LocalTime workingStart,
+        LocalTime workingEnd,
         OffsetDateTime createdAt,
         OffsetDateTime updatedAt
 ) {
@@ -21,6 +24,8 @@ public record UserResponse(
                 user.getRole(),
                 user.getStatus(),
                 user.getTimezone(),
+                user.getWorkingStart(),
+                user.getWorkingEnd(),
                 user.getCreatedAt(),
                 user.getUpdatedAt()
         );

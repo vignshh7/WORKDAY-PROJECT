@@ -110,7 +110,7 @@ shape:
 |---|---|---|
 | `GET /api/users` | ADMIN | List every user |
 | `GET /api/users/{id}` | self-or-ADMIN | `UserResponse` |
-| `PUT /api/users/{id}` | self-or-ADMIN | Body: `UpdateUserRequest{name, timezone}` |
+| `PUT /api/users/{id}` | self-or-ADMIN | Body: `UpdateUserRequest{name, timezone, workingStart?, workingEnd?}` — the last two must both be set or both left `null` (`null` means "use the org default"); `workingEnd` must be after `workingStart` |
 | `PATCH /api/users/{id}/status` | ADMIN | Body: `UpdateUserStatusRequest{status: ACTIVE\|INACTIVE\|SUSPENDED}` |
 
 `UserResponse`: `{id, name, email, role, status, timezone, createdAt, updatedAt}`
@@ -121,6 +121,7 @@ shape:
 |---|---|---|
 | `POST /api/candidates` | RECRUITER/ADMIN | Body: `CreateCandidateRequest{userId, phone, resumeUrl}` — attaches a profile to an *already-registered* `CANDIDATE` user |
 | `GET /api/candidates` | RECRUITER/ADMIN | List every candidate |
+| `GET /api/candidates/me` | CANDIDATE | Resolves the signed-in candidate's own profile — the only way a candidate can discover their own candidate id, since `findAll` is staff-only |
 | `GET /api/candidates/{id}` | self-or-staff | |
 | `PUT /api/candidates/{id}` | self-or-staff | Body: `UpdateCandidateRequest{phone, resumeUrl}` |
 | `GET /api/candidates/{id}/skills` | self-or-staff | -> `List<CandidateSkillResponse>` |
@@ -174,7 +175,8 @@ Round-level actions (`complete`, `result`, `book`, etc.) live under `/api/interv
 | Endpoint | Role | Notes |
 |---|---|---|
 | `POST /api/interviewers` | RECRUITER/ADMIN | Body: `CreateInterviewerProfileRequest{userId, department, designation, domain, maxInterviewsPerDay}` — attaches a profile to an already-registered `INTERVIEWER` user |
-| `GET /api/interviewers` | any authenticated user | |
+| `GET /api/interviewers` | RECRUITER/ADMIN | List every interviewer profile (despite the doc previously here, this is actually staff-only — `InterviewerService.findAll` calls `requireRecruiterOrAdmin`) |
+| `GET /api/interviewers/me` | INTERVIEWER | Resolves the signed-in interviewer's own profile — the only way an interviewer can discover their own interviewer id, since `findAll` is staff-only |
 | `GET /api/interviewers/{id}` | any authenticated user | |
 | `GET /api/interviewers/{id}/skills` | any authenticated user | -> `List<InterviewerSkillResponse>` |
 | `POST /api/interviewers/{id}/skills` | any authenticated user | Body: `InterviewerSkillRequest{skillId, proficiency (1-5), yearsExperience, isPrimary}` |
@@ -251,11 +253,14 @@ curl -X POST http://localhost:8080/api/scheduling/recommend \
 **How a participant's "available windows" are computed** (candidate, each eligible interviewer,
 and any required participant are all resolved the same way):
 - **Connected to Google Calendar** (`CALENDAR_PROVIDER=google` and they've completed
-  `/authorize`): availability = the organization's configured working hours
-  (`scheduling_config.working_start`/`working_end`, weekend policy), expressed in **that user's
-  own stored timezone** (`users.timezone`, set at registration or via `PUT /api/users/{id}`),
-  minus whatever Google's `freebusy.query` reports as busy for them in the requested date range.
-  Their manual `Availability` rows are not consulted at all in this case.
+  `/authorize`): availability = their own working hours — `users.working_start`/`working_end`
+  if they've set a personal override via `PUT /api/users/{id}`, otherwise the organization's
+  configured default (`scheduling_config.working_start`/`working_end`), weekend policy either
+  way — expressed in **that user's own stored timezone** (`users.timezone`, set at registration
+  or via `PUT /api/users/{id}`), minus whatever Google's `freebusy.query` reports as busy for
+  them in the requested date range and minus any of their own other SCHEDULED/IN_PROGRESS
+  interview rounds (buffer-expanded). Their manual `Availability` rows are not consulted at all
+  in this case.
 - **Not connected**: falls back to their manual `Availability` `AVAILABLE` rows exactly as
   before Phase 20 — this is the only case where `POST /api/availability` entries actually feed
   the scheduling engine.
@@ -272,7 +277,8 @@ All under `/api/interviews/{roundId}/...` — "an interview" here means one `int
 
 | Endpoint | Role | Body | Returns |
 |---|---|---|---|
-| `POST /{id}/book` | RECRUITER/ADMIN | `BookingRequest{interviewerId, start, end, timezone, idempotencyKey, additionalParticipantIds?}` | `BookingResponse{interviewRoundId, status, scheduledStart, scheduledEnd, interviewerId, calendarEventId, message}` |
+| `GET /{id}` | staff, the round's own candidate, or an active participant (e.g. the assigned INTERVIEWER) | — | `InterviewRoundDetailResponse{round, process, rounds, candidate}` — the only way to fetch a single round by id; access is checked inside the service since it depends on the round's own data, not just the caller's role |
+| `POST /{id}/book` | RECRUITER/ADMIN, or CANDIDATE (must be the round's own candidate) | `BookingRequest{interviewerId, start, end, timezone, idempotencyKey, additionalParticipantIds?}` | `BookingResponse{interviewRoundId, status, scheduledStart, scheduledEnd, interviewerId, calendarEventId, message}` |
 | `POST /{id}/complete` | RECRUITER/ADMIN, or INTERVIEWER (must be the assigned one) | `CompleteRoundRequest` (empty, or omit body) | `InterviewRoundResponse` — moves SCHEDULED/IN_PROGRESS → COMPLETED |
 | `POST /{id}/result` | RECRUITER/ADMIN, or INTERVIEWER (must be the assigned one) | `RoundResultRequest{result: PASS\|FAIL\|HOLD}` | `InterviewRoundResponse` — PASS advances the candidate (or SELECTED on the last round) and clears the next round to be scheduled; FAIL rejects the candidate and cancels every future round; HOLD is a no-op on progression |
 | `POST /{id}/reschedule` | self-or-staff | `RescheduleRequest{reason?, dateFrom?, dateTo?, preferredTimeStart?, preferredTimeEnd?}` (or omit body) | `SchedulingResponse` — round → `RESCHEDULE_REQUIRED`, then re-runs find+rank immediately, returning new candidate slots |
@@ -455,3 +461,16 @@ Documented here rather than silently left for someone to discover:
   or interviewer switch always cancels the old calendar event and creates a fresh one (the new
   slot can have a different interviewer/participants entirely) — see `README.md`'s Phase 20
   section for the full reasoning.
+- **Google Calendar push notifications are never actually sent by Google.** `POST
+  /api/integrations/google-calendar/webhook` and `CalendarReconciliationService`'s drift
+  detection (deleted event, time changed externally, an attendee declined) are fully
+  implemented, but the `events.watch()` call that registers a push channel with Google in the
+  first place was never built (see `CalendarWebhookService`'s own Javadoc) — so Google has no
+  channel to notify on and the webhook path sits dormant. `CalendarReconciliationService` also
+  runs on a `@Scheduled` 10-second poll (skipped unless `CALENDAR_PROVIDER=google`) specifically
+  so drift — including an interviewer or other attendee declining directly in their own Google
+  Calendar rather than through this app — is still caught, just within one poll interval
+  instead of instantly. A 10-second interval is aggressive (chosen for fast feedback while
+  testing) and calls Google's API once per tracked future event on every tick; a real
+  deployment with many upcoming interviews would want this much longer, or the `events.watch()`
+  channel this was meant to stand in for.

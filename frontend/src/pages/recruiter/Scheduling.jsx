@@ -1,12 +1,11 @@
 import { useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
-  candidatesApi, interviewersApi, interviewsApi, schedulingApi,
+  candidatesApi, interviewersApi, interviewsApi, schedulingApi, usersApi,
 } from '../../api/endpoints';
 import { useFetch } from '../../hooks/useAsync';
 import { useInterviewerNames } from '../../hooks/useRounds';
 import { useToast } from '../../context/ToastContext';
-import { useAuth } from '../../auth/AuthContext';
 import { PageHeader } from '../../layouts/AppLayout';
 import {
   Button, Card, CardBody, CardHeader, EmptyState, ErrorState, Field,
@@ -17,8 +16,7 @@ import { InterviewerMatchList, SchedulingResults } from '../../components/Schedu
 import { AiPanel } from './AiScheduling';
 import { CANDIDATE_TERMINAL_STATUSES, WEEKDAYS } from '../../constants/enums';
 import {
-  browserTimezone, daysFromToday, formatTimeRange, timezoneOptions,
-  toBackendTime, todayInput,
+  browserTimezone, daysFromToday, formatTimeRange, toBackendTime, todayInput,
 } from '../../utils/datetime';
 import { createIdempotencyHolder } from '../../utils/idempotency';
 import { humanize } from '../../utils/format';
@@ -75,7 +73,6 @@ function FormScheduling() {
   const toast = useToast();
   const navigate = useNavigate();
   const [params] = useSearchParams();
-  const { timezone: userTz } = useAuth();
   const candidates = useFetch(() => candidatesApi.list(), []);
   const { interviewers, namesById } = useInterviewerNames();
 
@@ -89,7 +86,6 @@ function FormScheduling() {
     preferredTimeStart: '',
     preferredTimeEnd: '',
     excludedDays: [],
-    timezone: userTz || browserTimezone(),
   });
 
   const [match, setMatch] = useState(null);
@@ -108,6 +104,19 @@ function FormScheduling() {
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
   const selectedCandidate = (candidates.data || []).find((c) => c.id === form.candidateId);
+
+  // The search timezone is the CANDIDATE's own, not whoever is running this search — a
+  // recruiter and the candidate they're scheduling for can easily be in different zones,
+  // and "preferred morning slots" should mean the candidate's morning. Their working
+  // hours are already computed in their own timezone regardless (WorkingHoursService);
+  // this only governs how preferredTimeStart/End and excludedDays are interpreted, and
+  // what gets recorded as the round's timezone.
+  const candidateProfile = useFetch(
+    () => usersApi.get(selectedCandidate.userId),
+    [selectedCandidate?.userId],
+    { skip: !selectedCandidate?.userId },
+  );
+  const timezone = candidateProfile.data?.timezone || browserTimezone();
 
   // A round is what actually gets booked, and only rounds from the candidate's active
   // process are bookable. Refetched whenever the selected candidate changes.
@@ -138,7 +147,7 @@ function FormScheduling() {
     preferredTimeStart: toBackendTime(form.preferredTimeStart),
     preferredTimeEnd: toBackendTime(form.preferredTimeEnd),
     excludedDays: form.excludedDays.length ? form.excludedDays : undefined,
-    timezone: form.timezone,
+    timezone,
   });
 
   const runSearch = async () => {
@@ -187,7 +196,7 @@ function FormScheduling() {
         interviewerId: selectedSlot.interviewerId,
         start: selectedSlot.start,
         end: selectedSlot.end,
-        timezone: form.timezone,
+        timezone,
         idempotencyKey: idempotency.current.key(),
       });
       idempotency.current.reset();
@@ -312,27 +321,24 @@ function FormScheduling() {
                 </Field>
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
-                <Field label="Duration (minutes)" required>
-                  <Input
-                    type="number"
-                    min={15}
-                    step={15}
-                    required
-                    value={form.durationMinutes}
-                    onChange={set('durationMinutes')}
-                  />
-                </Field>
-                <Field label="Timezone" required>
-                  <Select value={form.timezone} onChange={set('timezone')} required>
-                    {timezoneOptions().map((tz) => (
-                      <option key={tz} value={tz}>
-                        {tz}
-                      </option>
-                    ))}
-                  </Select>
-                </Field>
-              </div>
+              <Field
+                label="Duration (minutes)"
+                required
+                hint={
+                  selectedCandidate
+                    ? `Times are searched and shown in ${timezone} — ${selectedCandidate.name}'s own timezone.`
+                    : undefined
+                }
+              >
+                <Input
+                  type="number"
+                  min={15}
+                  step={15}
+                  required
+                  value={form.durationMinutes}
+                  onChange={set('durationMinutes')}
+                />
+              </Field>
 
               <div className="grid grid-cols-2 gap-4">
                 <Field label="Preferred time from" hint="Optional">
@@ -506,11 +512,11 @@ function FormScheduling() {
           <div className="space-y-3 text-sm">
             <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
               <p className="font-medium text-slate-900">
-                {formatTimeRange(selectedSlot.start, selectedSlot.end, form.timezone)}
+                {formatTimeRange(selectedSlot.start, selectedSlot.end, timezone)}
               </p>
               <p className="mt-1 text-xs text-slate-600">
                 {namesById[selectedSlot.interviewerId] || 'Assigned interviewer'} ·{' '}
-                {form.timezone}
+                {timezone}
               </p>
             </div>
             <p className="text-slate-700">

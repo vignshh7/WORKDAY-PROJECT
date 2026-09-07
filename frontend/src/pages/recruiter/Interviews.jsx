@@ -70,7 +70,7 @@ export default function Interviews() {
       render: (r) =>
         r.scheduledStart ? (
           <span className="text-sm text-slate-700">
-            {formatTimeRange(r.scheduledStart, r.scheduledEnd, r.timezone)}
+            {formatTimeRange(r.scheduledStart, r.scheduledEnd)}
           </span>
         ) : (
           <span className="text-xs text-slate-400">Not scheduled</span>

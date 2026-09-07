@@ -135,7 +135,7 @@ export default function RecruiterOverview() {
                         <p className="text-sm font-medium text-slate-900">{r.candidate.name}</p>
                         <p className="text-xs text-slate-600">
                           {humanize(r.roundType)} ·{' '}
-                          {formatTimeRange(r.scheduledStart, r.scheduledEnd, r.timezone)}
+                          {formatTimeRange(r.scheduledStart, r.scheduledEnd)}
                         </p>
                       </div>
                       <RoundStatusBadge status={r.status} />

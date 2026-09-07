@@ -1,15 +1,96 @@
 import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { integrationsApi } from '../../api/endpoints';
+import { integrationsApi, usersApi } from '../../api/endpoints';
 import { useFetch } from '../../hooks/useAsync';
 import { useToast } from '../../context/ToastContext';
+import { useAuth } from '../../auth/AuthContext';
 import { PageHeader } from '../../layouts/AppLayout';
 import {
   Badge, Button, Card, CardBody, CardHeader, DescriptionList,
-  ErrorState, InfoNote, LoadingState,
+  ErrorState, Field, InfoNote, Input, LoadingState, Select,
 } from '../../components/ui';
-import { formatDateTime } from '../../utils/datetime';
+import { formatDateTime, timezoneOptions, toBackendTime, toTimeInput } from '../../utils/datetime';
 import { parseApiError } from '../../utils/errors';
+
+/**
+ * Your own timezone and (optional) preferred working hours, editable here instead of only
+ * at registration. This is what the scheduling engine reads for you — your working-hours
+ * window (see WorkingHoursService) is computed in this timezone, using your own start/end
+ * override when you set one instead of the org-wide default — not whoever happens to be
+ * running a search, so a candidate and interviewer in different zones (or with different
+ * preferred hours) each get their own real availability instead of the search assuming
+ * they share one. Working hours only apply if you've connected Google Calendar; without
+ * it, your own manually-entered availability windows are used exactly as you enter them.
+ */
+function ProfileScheduleCard({ initialTimezone, initialWorkingStart, initialWorkingEnd }) {
+  const toast = useToast();
+  const { userId, name, refreshProfile } = useAuth();
+  const [timezone, setTimezone] = useState(initialTimezone || '');
+  const [workingStart, setWorkingStart] = useState(toTimeInput(initialWorkingStart));
+  const [workingEnd, setWorkingEnd] = useState(toTimeInput(initialWorkingEnd));
+  const [saving, setSaving] = useState(false);
+
+  const unchanged =
+    timezone === (initialTimezone || '') &&
+    workingStart === toTimeInput(initialWorkingStart) &&
+    workingEnd === toTimeInput(initialWorkingEnd);
+
+  const save = async () => {
+    if (workingStart && workingEnd && workingStart >= workingEnd) {
+      toast.error('Working hours end must be after start.');
+      return;
+    }
+    setSaving(true);
+    try {
+      await usersApi.update(userId, {
+        name,
+        timezone,
+        // Both-or-neither: an empty pair means "use the org default" on the backend.
+        workingStart: workingStart ? toBackendTime(workingStart) : null,
+        workingEnd: workingEnd ? toBackendTime(workingEnd) : null,
+      });
+      await refreshProfile();
+      toast.success('Schedule preferences updated.');
+    } catch (err) {
+      toast.apiError(err);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader
+        title="Your timezone & working hours"
+        subtitle="Used for your own availability — not whoever is running a search."
+      />
+      <CardBody className="space-y-4">
+        <Field label="Timezone">
+          <Select value={timezone} onChange={(e) => setTimezone(e.target.value)}>
+            {timezoneOptions()
+              .concat(timezone && !timezoneOptions().includes(timezone) ? [timezone] : [])
+              .map((tz) => (
+                <option key={tz} value={tz}>
+                  {tz}
+                </option>
+              ))}
+          </Select>
+        </Field>
+        <div className="grid grid-cols-2 gap-4">
+          <Field label="Preferred start" hint="Optional — leave blank to use the org default">
+            <Input type="time" value={workingStart} onChange={(e) => setWorkingStart(e.target.value)} />
+          </Field>
+          <Field label="Preferred end" hint="Optional — leave blank to use the org default">
+            <Input type="time" value={workingEnd} onChange={(e) => setWorkingEnd(e.target.value)} />
+          </Field>
+        </div>
+        <Button onClick={save} loading={saving} disabled={unchanged}>
+          Save
+        </Button>
+      </CardBody>
+    </Card>
+  );
+}
 
 // This page MUST live at /settings/integrations: the backend's OAuth callback
 // redirects the browser to {APP_BASE_URL}/settings/integrations?google=connected
@@ -17,6 +98,7 @@ import { parseApiError } from '../../utils/errors';
 
 export default function Integrations() {
   const toast = useToast();
+  const { profile } = useAuth();
   const [params, setParams] = useSearchParams();
   const [connecting, setConnecting] = useState(false);
   const { data, error, loading, reload } = useFetch(() => integrationsApi.status(), []);
@@ -69,6 +151,13 @@ export default function Integrations() {
 
       <div className="grid gap-5 lg:grid-cols-3">
         <div className="space-y-5 lg:col-span-2">
+          <ProfileScheduleCard
+            key={profile?.timezone || 'pending'}
+            initialTimezone={profile?.timezone}
+            initialWorkingStart={profile?.workingStart}
+            initialWorkingEnd={profile?.workingEnd}
+          />
+
           <Card>
             <CardHeader
               title="Google Calendar"

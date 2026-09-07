@@ -36,6 +36,8 @@ public class UserService {
         User user = getOwnedOrAdmin(id);
         user.setName(request.name());
         user.setTimezone(request.timezone());
+        user.setWorkingStart(request.workingStart());
+        user.setWorkingEnd(request.workingEnd());
         return UserResponse.from(userRepository.saveAndFlush(user));
     }
 

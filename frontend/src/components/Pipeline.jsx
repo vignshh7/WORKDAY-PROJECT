@@ -1,6 +1,6 @@
 import { Badge, Card, CardBody, CardHeader } from './ui';
 import { ProcessStatusBadge, ResultBadge, RoundStatusBadge } from './StatusBadge';
-import { formatTimeRange } from '../utils/datetime';
+import { browserTimezone, formatTimeRange } from '../utils/datetime';
 import { humanize } from '../utils/format';
 import { ROUND_TYPES } from '../constants/enums';
 
@@ -62,10 +62,10 @@ export function RoundSummary({ round, interviewerName, actions }) {
         </div>
         <p className="mt-1 text-xs text-slate-600">
           {round.scheduledStart
-            ? formatTimeRange(round.scheduledStart, round.scheduledEnd, round.timezone)
+            ? formatTimeRange(round.scheduledStart, round.scheduledEnd)
             : 'Not scheduled yet'}
-          {round.timezone && round.scheduledStart && (
-            <span className="ml-1 text-slate-400">({round.timezone})</span>
+          {round.scheduledStart && (
+            <span className="ml-1 text-slate-400">({browserTimezone()})</span>
           )}
         </p>
         <p className="mt-0.5 text-xs text-slate-500">

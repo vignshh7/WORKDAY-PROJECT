@@ -16,6 +16,7 @@ import lombok.ToString;
 import org.hibernate.annotations.CreationTimestamp;
 import org.hibernate.annotations.UpdateTimestamp;
 
+import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.util.UUID;
 
@@ -52,6 +53,14 @@ public class User {
 
     @Column(nullable = false, length = 50)
     private String timezone = "UTC";
+
+    /** Overrides {@code scheduling_config}'s org-wide working hours with this user's own
+     *  preferred window, in their own {@link #timezone}. Null means "use the org default". */
+    @Column(name = "working_start")
+    private LocalTime workingStart;
+
+    @Column(name = "working_end")
+    private LocalTime workingEnd;
 
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)
