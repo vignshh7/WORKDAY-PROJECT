@@ -42,10 +42,14 @@ import java.util.UUID;
  * {@link #createEvent}/{@link #updateEvent}/{@link #cancelEvent}/{@link #getEvent} whenever
  * that user is the calendar owner of record.
  *
- * <p>{@code sendUpdates("none")} is used on every write: this system already has its own
- * {@code NotificationService} (Phase 22) as the single source of truth for who was told what
- * about an interview, so Google is not asked to also email attendees directly — avoiding
- * duplicate/inconsistent notifications, not an oversight.
+ * <p>{@code sendUpdates("all")} is used on every write: Google's own invite/update/cancellation
+ * email is the delivery mechanism for every attendee (candidate, interviewer, recruiter,
+ * hiring manager) — it's what actually gets the Google Meet link and the event itself onto an
+ * attendee's own calendar, including a candidate who has never connected Google Calendar to
+ * this system at all (they just need a valid email address, which we always have). This is in
+ * addition to, not instead of, this system's own {@code NotificationService} (Phase 22)
+ * IN_APP notifications — the two are different channels serving different purposes (an
+ * in-app notification center vs. an actual calendar invite) and aren't duplicates of each other.
  *
  * <p>Error handling contract (inherited from {@link CalendarProvider}):
  * <ul>
@@ -94,7 +98,7 @@ public class GoogleCalendarProvider implements CalendarProvider {
         Event created = executeWithRetry(request.calendarOwnerUserId(),
                 token -> client(token).events().insert(CALENDAR_ID, event)
                         .setConferenceDataVersion(1)
-                        .setSendUpdates("none")
+                        .setSendUpdates("all")
                         .execute(), "createEvent");
         return new ExternalEventResult(created.getId(), extractMeetingLink(created));
     }
@@ -108,7 +112,7 @@ public class GoogleCalendarProvider implements CalendarProvider {
         Event updated = executeWithRetry(request.calendarOwnerUserId(),
                 token -> client(token).events().patch(CALENDAR_ID, externalEventId, patch)
                         .setConferenceDataVersion(1)
-                        .setSendUpdates("none")
+                        .setSendUpdates("all")
                         .execute(), "updateEvent");
         return new ExternalEventResult(updated.getId(), extractMeetingLink(updated));
     }
@@ -118,7 +122,7 @@ public class GoogleCalendarProvider implements CalendarProvider {
         log.debug("[GOOGLE] cancelEvent externalId={} ownerUserId={}", externalEventId, calendarOwnerUserId);
         try {
             executeWithRetry(calendarOwnerUserId, token -> {
-                client(token).events().delete(CALENDAR_ID, externalEventId).setSendUpdates("none").execute();
+                client(token).events().delete(CALENDAR_ID, externalEventId).setSendUpdates("all").execute();
                 return null;
             }, "cancelEvent");
         } catch (CalendarIntegrationException e) {

@@ -72,10 +72,15 @@ WHAT CHANGED VS. THE ORIGINAL BACKEND DESIGN (read this first)
    the result" as a valid response shape from `/schedule`, not assume every action needs a
    `/confirm` round-trip.
 
-8. **Email notifications are configured but not wired to any specific notification type** — every
-   backend notification today is `IN_APP` only (the `channel` field on `NotificationResponse`
-   will read `IN_APP`, never `EMAIL`, until/unless a future backend change opts specific types
-   into email). Don't build UI copy that promises "we emailed you" based on today's data.
+8. **Two separate email paths exist — don't conflate them.** `GET /api/notifications`
+   (`NotificationResponse.channel`) is always `IN_APP` today — this system's own SMTP-based
+   email sending exists but nothing chooses it yet, so don't build UI copy implying the in-app
+   notification center itself sent an email. Separately, once `CALENDAR_PROVIDER=google` is
+   configured, every booking/reschedule/cancellation DOES send a real Google Calendar invite/
+   update/cancellation email to every attendee (candidate, interviewer, recruiter) — that's
+   Google's own delivery, entirely independent of the in-app notification system, and needs no
+   frontend involvement to happen; it's driven by whatever email address each user registered
+   with, whether or not they've personally connected Google Calendar.
 
 ------------------------------------------------------------
 PHASE 31 — FRONTEND FOUNDATION
@@ -305,9 +310,12 @@ logged-in user (any role) needs:
 - There is no "disconnect" endpoint on the backend today — if that's needed for the demo, it's a
   backend gap to flag, not something to fake client-side.
 
-Meeting link: a booked interview's Google Meet link isn't returned as a dedicated field on
-`BookingResponse`/`InterviewRoundResponse` today — it lives on the underlying Google Calendar
-event. If the UI needs to surface it directly, this is a backend gap (add a `meetingLink` field
+Meeting link: every attendee (candidate, interviewer, recruiter) gets Google's own real calendar
+invite email with the Meet link on it directly — Google generates and delivers this, no frontend
+work needed for that path. The one gap: the Meet link isn't ALSO returned as a dedicated field on
+`BookingResponse`/`InterviewRoundResponse` — it lives only on the underlying Google Calendar
+event. If the UI wants to show the link directly on the interview-details page (not just rely on
+the recipient checking their email/calendar), that's a backend gap (add a `meetingLink` field
 sourced from the calendar event) to flag rather than something derivable purely client-side.
 
 ------------------------------------------------------------

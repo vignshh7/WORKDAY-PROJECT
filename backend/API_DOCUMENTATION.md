@@ -330,9 +330,15 @@ URL), and `CALENDAR_PROVIDER=google` (defaults to `noop`, which makes every cale
 harmless no-op). Until then, `/authorize` and `/callback` respond with a clear `502`
 "Google OAuth is not configured" rather than a stack trace.
 
-When connected, an interview event is created on the **assigned interviewer's** calendar (not
-the candidate's or recruiter's) with everyone else invited by email address — a candidate who
-hasn't connected Google still gets a normal email invite, since they're only ever an attendee.
+When connected, an interview event (with a generated Google Meet link, via `conferenceData`) is
+created on the **assigned interviewer's** calendar (not the candidate's or recruiter's), with
+every other participant added as an attendee by email address. Every create/update/cancel call
+uses `sendUpdates("all")`, so Google sends its own real invite/update/cancellation email to
+every attendee and adds the event (with the Meet link) to their own calendar if they open and
+accept it — this works for a candidate who has never connected Google Calendar to this system at
+all, since Google's invite only needs a valid email address, not our OAuth connection. This is
+separate from and in addition to the app's own `IN_APP` notifications (see Notifications below);
+it is not routed through `NotificationService`/SMTP at all — Google delivers it directly.
 
 ## Notifications
 
@@ -436,11 +442,15 @@ Documented here rather than silently left for someone to discover:
   request. `scheduling_config` (working hours, buffer, notice period, max reschedules,
   replacement policy) exists and is read by the engine, but nothing exposes it for editing via
   API today — it would need a direct database update.
-- **EMAIL channel is implemented but nothing chooses it.** `NotificationService` supports
-  `EMAIL` delivery (`SmtpEmailSender`, real SMTP via `NOTIFICATION_EMAIL_PROVIDER=smtp`), but
-  every existing call site (booking, cancellation, rescheduling, reminders, etc.) uses `IN_APP`.
-  Wiring specific notification types to also send email is a deliberate follow-up decision, not
-  done here.
+- **`NotificationService`'s own EMAIL channel is implemented but nothing chooses it.**
+  `NotificationService` supports `EMAIL` delivery (`SmtpEmailSender`, real SMTP via
+  `NOTIFICATION_EMAIL_PROVIDER=smtp`), but every existing call site (booking, cancellation,
+  rescheduling, reminders, etc.) uses `IN_APP`. Wiring specific notification types to also send
+  email through *this system's own* SMTP is a deliberate follow-up decision, not done here. This
+  is separate from Google's own calendar invite email (see Google Calendar Integration above),
+  which already goes out for real for every booking/reschedule/cancellation once
+  `CALENDAR_PROVIDER=google` is configured — that path doesn't touch `NotificationService`/SMTP
+  at all, so it works independently of this gap.
 - **`updateEvent` on the Google Calendar provider is implemented but unreachable.** A reschedule
   or interviewer switch always cancels the old calendar event and creates a fresh one (the new
   slot can have a different interviewer/participants entirely) — see `README.md`'s Phase 20
