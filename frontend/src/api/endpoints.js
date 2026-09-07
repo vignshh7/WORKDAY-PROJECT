@@ -20,7 +20,8 @@ export const authApi = {
 export const usersApi = {
   list: () => unwrap(api.get('/api/users')), // ADMIN
   get: (id) => unwrap(api.get(`/api/users/${id}`)), // self-or-ADMIN
-  update: (id, body) => unwrap(api.put(`/api/users/${id}`, body)), // {name, timezone}
+  // {name, timezone, workingStart?, workingEnd?} — the last two are "HH:mm:ss" or null (org default)
+  update: (id, body) => unwrap(api.put(`/api/users/${id}`, body)),
   // {status: ACTIVE|INACTIVE|SUSPENDED} — ADMIN
   setStatus: (id, status) => unwrap(api.patch(`/api/users/${id}/status`, { status })),
 };
@@ -29,6 +30,8 @@ export const usersApi = {
 
 export const candidatesApi = {
   list: () => unwrap(api.get('/api/candidates')), // RECRUITER/ADMIN
+  // Lets a signed-in CANDIDATE resolve their own profile id without the staff-only list().
+  mine: () => unwrap(api.get('/api/candidates/me')),
   get: (id) => unwrap(api.get(`/api/candidates/${id}`)),
   create: (body) => unwrap(api.post('/api/candidates', body)), // {userId, phone, resumeUrl}
   update: (id, body) => unwrap(api.put(`/api/candidates/${id}`, body)), // {phone, resumeUrl}
@@ -71,7 +74,9 @@ export const processesApi = {
 /* -------------------------------------------------------- interviewers ---- */
 
 export const interviewersApi = {
-  list: () => unwrap(api.get('/api/interviewers')),
+  list: () => unwrap(api.get('/api/interviewers')), // RECRUITER/ADMIN
+  // Lets a signed-in INTERVIEWER resolve their own profile id without the staff-only list().
+  mine: () => unwrap(api.get('/api/interviewers/me')),
   get: (id) => unwrap(api.get(`/api/interviewers/${id}`)),
   // {userId, department, designation, domain, maxInterviewsPerDay} — RECRUITER/ADMIN
   create: (body) => unwrap(api.post('/api/interviewers', body)),
@@ -108,6 +113,9 @@ export const schedulingApi = {
 /* ----------------------------------------------------------- interviews ---- */
 
 export const interviewsApi = {
+  // {round, process, rounds, candidate} — self-or-staff-or-participant. The only way to
+  // fetch a single round by id; works for an INTERVIEWER too, unlike scanning candidate lists.
+  get: (roundId) => unwrap(api.get(`/api/interviews/${roundId}`)),
   // {interviewerId, start, end, timezone, idempotencyKey, additionalParticipantIds?}
   // Re-validates from scratch server-side; a stale slot comes back as 422.
   book: (roundId, body) => unwrap(api.post(`/api/interviews/${roundId}/book`, body)),

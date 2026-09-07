@@ -73,6 +73,20 @@ public class CandidateService {
         return CandidateResponse.from(getOwnedOrStaff(id));
     }
 
+    /**
+     * Resolves the signed-in CANDIDATE's own profile. Exists because {@link #findAll} is
+     * staff-only, so a candidate has no other way to discover their own candidate id (which
+     * every other candidate-scoped endpoint requires) — see the frontend's previous manual
+     * "paste your candidate id" workaround, which this replaces.
+     */
+    @Transactional(readOnly = true)
+    public CandidateResponse findMine() {
+        UserPrincipal caller = SecurityUtils.currentUser();
+        Candidate candidate = candidateRepository.findByUserId(caller.getId())
+                .orElseThrow(() -> new ResourceNotFoundException("No candidate profile for the current user"));
+        return CandidateResponse.from(candidate);
+    }
+
     @Transactional
     public CandidateResponse update(UUID id, UpdateCandidateRequest request) {
         Candidate candidate = getOwnedOrStaff(id);

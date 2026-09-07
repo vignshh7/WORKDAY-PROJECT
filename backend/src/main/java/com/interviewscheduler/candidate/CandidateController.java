@@ -39,6 +39,15 @@ public class CandidateController {
         return candidateService.findAll();
     }
 
+    /** Lets a signed-in CANDIDATE discover their own profile id without needing the
+     *  staff-only {@link #getAll}. Must stay above {@code /{id}} — Spring routes the
+     *  literal "/me" here rather than treating it as a path variable. */
+    @GetMapping("/me")
+    @PreAuthorize("hasRole('CANDIDATE')")
+    public CandidateResponse getMine() {
+        return candidateService.findMine();
+    }
+
     @GetMapping("/{id}")
     public CandidateResponse getById(@PathVariable UUID id) {
         return candidateService.findById(id);

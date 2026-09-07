@@ -11,6 +11,7 @@ import com.interviewscheduler.interview.ParticipantDeclineService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -36,8 +37,21 @@ public class InterviewController {
     private final InterviewerReplacementService interviewerReplacementService;
     private final ParticipantDeclineService participantDeclineService;
 
+    /** The only way to fetch a single round by id — see {@link
+     *  InterviewProcessService#getRoundDetail} for why the frontend needs this instead of the
+     *  staff-only/self-only list endpoints it used to scan client-side. No {@code @PreAuthorize}
+     *  here: access (staff, the round's own candidate, or an active participant) is checked
+     *  inside the service, since it depends on the round's own data, not just the caller's role. */
+    @GetMapping("/{id}")
+    public InterviewRoundDetailResponse getById(@PathVariable UUID id) {
+        return interviewProcessService.getRoundDetail(id);
+    }
+
+    /** Staff may book any round; a CANDIDATE may only book their own — {@link
+     *  InterviewBookingService#book} enforces the ownership check. This is what lets a
+     *  candidate confirm one of the slots their own reschedule search returned. */
     @PostMapping("/{id}/book")
-    @PreAuthorize("hasAnyRole('RECRUITER', 'ADMIN')")
+    @PreAuthorize("hasAnyRole('RECRUITER', 'ADMIN', 'CANDIDATE')")
     public BookingResponse book(@PathVariable UUID id, @Valid @RequestBody BookingRequest request) {
         return interviewBookingService.book(id, request);
     }

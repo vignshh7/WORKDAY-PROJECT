@@ -33,19 +33,17 @@ export function AuthProvider({ children }) {
     return () => setUnauthorizedHandler(null);
   }, []);
 
-  // Resolve the role-specific profile id. CANDIDATE can't list candidates (that's
-  // RECRUITER/ADMIN), so a candidate finds their own row via the id stashed at login
-  // if present; interviewers can list, so they match on userId.
+  // Resolve the role-specific profile id. Neither CANDIDATE nor INTERVIEWER can list their
+  // own kind (that's RECRUITER/ADMIN-only), so each resolves their own row via its own
+  // GET .../me endpoint instead.
   const loadRoleProfile = useCallback(async (user) => {
     if (!user) return null;
     try {
       if (user.role === 'INTERVIEWER') {
-        const all = await interviewersApi.list();
-        return all.find((i) => i.userId === user.userId) || null;
+        return await interviewersApi.mine();
       }
       if (user.role === 'CANDIDATE') {
-        const all = await candidatesApi.list().catch(() => null);
-        if (all) return all.find((c) => c.userId === user.userId) || null;
+        return await candidatesApi.mine();
       }
     } catch {
       // Not fatal — pages that need it show their own "no profile yet" state.

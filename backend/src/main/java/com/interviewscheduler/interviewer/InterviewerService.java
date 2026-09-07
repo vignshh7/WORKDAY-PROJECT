@@ -64,6 +64,20 @@ public class InterviewerService {
         return InterviewerResponse.from(getOwnedOrStaff(id));
     }
 
+    /**
+     * Resolves the signed-in INTERVIEWER's own profile. Exists for the same reason as
+     * {@code CandidateService#findMine} - {@link #findAll} is staff-only, so an interviewer has
+     * no other way to discover their own interviewer id (needed for the skills endpoints, and
+     * for the frontend's {@code roleProfile} resolution the interviewer dashboard depends on).
+     */
+    @Transactional(readOnly = true)
+    public InterviewerResponse findMine() {
+        UserPrincipal caller = SecurityUtils.currentUser();
+        InterviewerProfile profile = interviewerProfileRepository.findByUserId(caller.getId())
+                .orElseThrow(() -> new ResourceNotFoundException("No interviewer profile for the current user"));
+        return InterviewerResponse.from(profile);
+    }
+
     @Transactional(readOnly = true)
     public List<InterviewerSkillResponse> getSkills(UUID id) {
         getOwnedOrStaff(id); // authorization check; result unused

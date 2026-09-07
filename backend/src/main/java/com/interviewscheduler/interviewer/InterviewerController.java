@@ -34,6 +34,15 @@ public class InterviewerController {
         return interviewerService.findAll();
     }
 
+    /** Lets a signed-in INTERVIEWER discover their own profile id without needing the
+     *  staff-only {@link #getAll}. Must stay above {@code /{id}} — Spring routes the
+     *  literal "/me" here rather than treating it as a path variable. */
+    @GetMapping("/me")
+    @PreAuthorize("hasRole('INTERVIEWER')")
+    public InterviewerResponse getMine() {
+        return interviewerService.findMine();
+    }
+
     @GetMapping("/{id}")
     public InterviewerResponse getById(@PathVariable UUID id) {
         return interviewerService.findById(id);

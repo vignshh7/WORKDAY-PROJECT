@@ -4,6 +4,7 @@ import com.interviewscheduler.audit.AuditAction;
 import com.interviewscheduler.audit.AuditService;
 import com.interviewscheduler.candidate.Candidate;
 import com.interviewscheduler.candidate.CandidateRepository;
+import com.interviewscheduler.candidate.CandidateResponse;
 import com.interviewscheduler.candidate.CandidateStatus;
 import com.interviewscheduler.common.exception.ConflictException;
 import com.interviewscheduler.common.exception.DuplicateResourceException;
@@ -113,6 +114,43 @@ public class InterviewProcessService {
                 .orElseThrow(() -> new ResourceNotFoundException(
                         "No active interview process for candidate: " + candidateId));
         return InterviewProcessResponse.from(process);
+    }
+
+    /**
+     * Everything the frontend's shared per-round page needs, in one call. There is no other
+     * endpoint that fetches a single round by id — the frontend used to work around that by
+     * scanning every candidate's pipeline client-side, which only works for staff (who can list
+     * every candidate) and a candidate looking at their own round. An INTERVIEWER has no
+     * "list every candidate" access at all, so that workaround silently returned "not found"
+     * for every round an interviewer tried to open — not because access was denied, but because
+     * the lookup itself never ran their case. Access here is instead an explicit check: staff
+     * see any round, a candidate sees their own, and an interviewer (or any other participant)
+     * sees a round they are actually an active participant on.
+     */
+    @Transactional(readOnly = true)
+    public InterviewRoundDetailResponse getRoundDetail(UUID roundId) {
+        InterviewRound round = getRoundOrThrow(roundId);
+        InterviewProcess process = round.getProcess();
+        Candidate candidate = process.getCandidate();
+
+        UserPrincipal caller = SecurityUtils.currentUser();
+        boolean isStaff = caller.getRole() == Role.RECRUITER || caller.getRole() == Role.ADMIN;
+        boolean isOwnCandidate = candidate.getUser().getId().equals(caller.getId());
+        boolean isActiveParticipant = interviewParticipantRepository
+                .findByInterviewRoundIdAndUserId(roundId, caller.getId())
+                .filter(p -> p.getStatus() != ParticipantStatus.REMOVED)
+                .isPresent();
+        if (!isStaff && !isOwnCandidate && !isActiveParticipant) {
+            throw new ForbiddenException("Cannot access this interview round");
+        }
+
+        List<InterviewRoundResponse> rounds = interviewRoundRepository
+                .findByProcessIdOrderByRoundNumberAsc(process.getId()).stream()
+                .map(InterviewRoundResponse::from)
+                .toList();
+
+        return new InterviewRoundDetailResponse(InterviewRoundResponse.from(round),
+                InterviewProcessResponse.from(process), rounds, CandidateResponse.from(candidate));
     }
 
     /**

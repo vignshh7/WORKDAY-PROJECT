@@ -26,8 +26,12 @@ import com.interviewscheduler.interview.RoundStatus;
 import com.interviewscheduler.interviewer.InterviewerProfile;
 import com.interviewscheduler.interviewer.InterviewerProfileRepository;
 import com.interviewscheduler.interviewer.InterviewerMatchingService;
+import com.interviewscheduler.common.exception.ForbiddenException;
 import com.interviewscheduler.notification.NotificationService;
 import com.interviewscheduler.notification.NotificationType;
+import com.interviewscheduler.security.SecurityUtils;
+import com.interviewscheduler.security.UserPrincipal;
+import com.interviewscheduler.user.Role;
 import com.interviewscheduler.user.User;
 import com.interviewscheduler.user.UserRepository;
 import com.interviewscheduler.user.UserStatus;
@@ -112,6 +116,12 @@ public class InterviewBookingService {
         InterviewRound round = interviewRoundRepository.findByIdForUpdate(roundId)
                 .orElseThrow(() -> new ResourceNotFoundException("No interview round with id: " + roundId));
         Candidate candidate = round.getProcess().getCandidate();
+
+        UserPrincipal caller = SecurityUtils.currentUser();
+        if (caller.getRole() == Role.CANDIDATE && !candidate.getUser().getId().equals(caller.getId())) {
+            throw new ForbiddenException("You can only book your own interview round");
+        }
+
         schedulabilityGuard.validate(candidate, round);
 
         InterviewerProfile interviewer = interviewerProfileRepository.findByIdForUpdate(request.interviewerId())

@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { candidatesApi, interviewsApi } from '../api/endpoints';
+import { interviewsApi } from '../api/endpoints';
 import { useFetch } from '../hooks/useAsync';
 import { useInterviewerNames } from '../hooks/useRounds';
 import { useToast } from '../context/ToastContext';
@@ -15,7 +15,7 @@ import {
 } from '../components/StatusBadge';
 import { PipelineTrack } from '../components/Pipeline';
 import { SchedulingResults } from '../components/SchedulingResults';
-import { formatDate, formatTimeRange, toBackendTime } from '../utils/datetime';
+import { browserTimezone, formatDate, formatTimeRange, toBackendTime } from '../utils/datetime';
 import { createIdempotencyHolder } from '../utils/idempotency';
 import { humanize } from '../utils/format';
 import { parseApiError } from '../utils/errors';
@@ -27,32 +27,29 @@ import { parseApiError } from '../utils/errors';
 export default function InterviewDetail() {
   const { roundId } = useParams();
   const toast = useToast();
-  const { role, userId, roleProfile } = useAuth();
+  const { role, userId } = useAuth();
   const { namesById } = useInterviewerNames();
 
-  // A round isn't fetchable on its own; it comes from the candidate's pipeline. Staff
-  // find it by scanning candidates, participants via their own pipeline.
+  // GET /api/interviews/{id} works for staff, the round's own candidate, and any active
+  // participant (including an INTERVIEWER) — see InterviewProcessService.getRoundDetail.
+  // A 404 or 403 both mean "you can't open this," which the EmptyState below already
+  // phrases as one honest, non-committal message rather than distinguishing them.
   const { data, error, loading, reload } = useFetch(async () => {
-    const isStaff = role === 'RECRUITER' || role === 'ADMIN';
-    const candidates = isStaff
-      ? await candidatesApi.list()
-      : role === 'CANDIDATE' && roleProfile
-        ? [roleProfile]
-        : [];
-
-    for (const candidate of candidates) {
-      const entries = await candidatesApi.pipeline(candidate.id).catch(() => []);
-      for (const entry of entries) {
-        const round = (entry.rounds || []).find((r) => r.id === roundId);
-        if (round) return { round, process: entry.process, rounds: entry.rounds, candidate };
-      }
+    try {
+      return await interviewsApi.get(roundId);
+    } catch (err) {
+      const status = err?.response?.status;
+      if (status === 404 || status === 403) return null;
+      throw err;
     }
-    return null;
-  }, [roundId, role, roleProfile?.id]);
+  }, [roundId]);
 
   // Slot lists returned by reschedule / interviewer-cancel / decline — those calls all
   // hand back a SchedulingResponse with fresh candidate slots.
   const [freshSlots, setFreshSlots] = useState(null);
+  const [selectedFreshSlot, setSelectedFreshSlot] = useState(null);
+  const [booking, setBooking] = useState(false);
+  const bookingIdempotency = useRef(createIdempotencyHolder());
   const [replacement, setReplacement] = useState(null);
   const [dialog, setDialog] = useState(null); // 'reschedule' | 'cancel' | ...
   const [busy, setBusy] = useState(false);
@@ -61,6 +58,38 @@ export default function InterviewDetail() {
     reload();
     setReplacement(null);
   }, [reload]);
+
+  const bookFreshSlot = async () => {
+    if (!selectedFreshSlot) return;
+    setBooking(true);
+    try {
+      await interviewsApi.book(roundId, {
+        interviewerId: selectedFreshSlot.interviewerId,
+        start: selectedFreshSlot.start,
+        end: selectedFreshSlot.end,
+        timezone: selectedFreshSlot.timezone,
+        idempotencyKey: bookingIdempotency.current.key(),
+      });
+      bookingIdempotency.current.reset();
+      toast.success('Interview booked. Calendar invitations go out from Google directly.');
+      setFreshSlots(null);
+      setSelectedFreshSlot(null);
+      refresh();
+    } catch (err) {
+      const parsed = parseApiError(err);
+      if (parsed.status === 422) {
+        setSelectedFreshSlot(null);
+        toast.warning('This slot was just taken. Pick another one below.', {
+          title: 'Slot no longer available',
+        });
+        bookingIdempotency.current.reset();
+      } else {
+        toast.apiError(err);
+      }
+    } finally {
+      setBooking(false);
+    }
+  };
 
   if (loading) return <LoadingState label="Loading interview…" />;
   if (error) return <ErrorState error={parseApiError(error)} onRetry={reload} />;
@@ -76,9 +105,10 @@ export default function InterviewDetail() {
 
   const { round, process, rounds, candidate } = data;
   const isStaff = role === 'RECRUITER' || role === 'ADMIN';
-  // InterviewRoundResponse carries no interviewerId (backend gap), so the UI can't tell
-  // whether this viewer is the assigned interviewer. Interviewer actions are shown and
-  // the backend rejects them with a 403 if they aren't — the check it already performs.
+  // Reliable, not just assumed: GET /api/interviews/{id} itself only succeeds for an
+  // INTERVIEWER who is an active participant on this exact round (see
+  // InterviewProcessService.getRoundDetail) — a non-participant interviewer never reaches
+  // this render at all, so no separate ownership check is needed here.
   const isAssignedInterviewer = role === 'INTERVIEWER';
   const isOwnCandidate = role === 'CANDIDATE' && candidate?.userId === userId;
   const isTerminalRound = ['COMPLETED', 'CANCELLED'].includes(round.status);
@@ -146,10 +176,13 @@ export default function InterviewDetail() {
                   {
                     label: 'Scheduled',
                     value: round.scheduledStart
-                      ? formatTimeRange(round.scheduledStart, round.scheduledEnd, round.timezone)
+                      ? formatTimeRange(round.scheduledStart, round.scheduledEnd)
                       : 'Not scheduled',
                   },
-                  { label: 'Timezone', value: round.timezone || '—' },
+                  {
+                    label: 'Shown in your time zone',
+                    value: browserTimezone(),
+                  },
                   { label: 'Duration', value: `${round.durationMinutes} minutes` },
                   { label: 'Buffer', value: `${round.bufferMinutes ?? 0} minutes` },
                   {
@@ -343,7 +376,10 @@ export default function InterviewDetail() {
                 action={
                   <button
                     type="button"
-                    onClick={() => setFreshSlots(null)}
+                    onClick={() => {
+                      setFreshSlots(null);
+                      setSelectedFreshSlot(null);
+                    }}
                     className="text-xs text-slate-500 hover:underline"
                   >
                     Dismiss
@@ -351,11 +387,23 @@ export default function InterviewDetail() {
                 }
               />
               <CardBody>
-                <SchedulingResults response={freshSlots} interviewerNames={namesById} />
-                {isStaff && (
-                  <Link to={`/recruiter/scheduling?candidateId=${candidate.id}`}>
-                    <Button className="mt-3 w-full">Go to scheduling to book one</Button>
-                  </Link>
+                {isStaff || isOwnCandidate ? (
+                  <SchedulingResults
+                    response={freshSlots}
+                    interviewerNames={namesById}
+                    selectedSlot={selectedFreshSlot}
+                    onSelectSlot={setSelectedFreshSlot}
+                    disabled={booking}
+                    footer={
+                      selectedFreshSlot && (
+                        <Button className="w-full" loading={booking} onClick={bookFreshSlot}>
+                          Confirm booking
+                        </Button>
+                      )
+                    }
+                  />
+                ) : (
+                  <SchedulingResults response={freshSlots} interviewerNames={namesById} />
                 )}
               </CardBody>
             </Card>

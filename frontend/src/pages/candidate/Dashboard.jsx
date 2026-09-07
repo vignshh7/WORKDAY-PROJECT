@@ -129,6 +129,9 @@ export default function CandidateDashboard() {
   const pipeline = useFetch(() => candidatesApi.pipeline(candidateId), [candidateId], {
     skip: !candidateId,
   });
+  const skills = useFetch(() => candidatesApi.skills(candidateId), [candidateId], {
+    skip: !candidateId,
+  });
 
   if (!candidateId) {
     return (
@@ -225,6 +228,41 @@ export default function CandidateDashboard() {
                   Unlink this profile
                 </Button>
               )}
+            </CardBody>
+          </Card>
+
+          <Card>
+            <CardHeader
+              title="Your skills"
+              subtitle="What interviewer matching compares against a job's requirements."
+            />
+            <CardBody>
+              {skills.loading && <LoadingState label="Loading skills…" />}
+              {skills.error && (
+                <ErrorState error={parseApiError(skills.error)} onRetry={skills.reload} />
+              )}
+              {!skills.loading && !skills.error && (skills.data?.length ? (
+                <ul className="space-y-2">
+                  {skills.data.map((s) => (
+                    <li
+                      key={s.id}
+                      className="flex items-center justify-between rounded-md border border-slate-200 px-3 py-2"
+                    >
+                      <span className="text-sm text-slate-800">{s.skillName}</span>
+                      <span className="flex items-center gap-2">
+                        <Badge tone="blue">level {s.proficiency}</Badge>
+                        <span className="text-xs text-slate-500">{s.yearsExperience}y</span>
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <EmptyState
+                  icon="🎯"
+                  title="No skills recorded"
+                  detail="Ask your recruiter to add skills to your profile."
+                />
+              ))}
             </CardBody>
           </Card>
 
